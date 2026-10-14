@@ -12,8 +12,9 @@ A desktop app for [linux_util](https://github.com/acebmxer/linux_util). Pick
 utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.
 
-> **Status: early development, no release yet.** The app lists every utility
-> with its install status, and installs, uninstalls and updates them. See
+> **Status: early development.** The app lists every utility with its install
+> status, and installs, uninstalls and updates them. Downloads are on the
+> [Releases](https://github.com/acebmxer/linux_util_desktop/releases) page. See
 > [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work currently
 > stands.
 

@@ -11,6 +11,8 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-14
+
 ### Added
 
 - **Packages**: an AppImage for any distro, a `.deb` for Debian/Ubuntu and an
