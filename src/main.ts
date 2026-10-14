@@ -704,6 +704,7 @@ type Theme = "system" | "light" | "dark";
 interface Settings {
   theme: Theme;
   check_updates: boolean;
+  beta_updates: boolean;
   linux_util: Record<string, string>;
 }
 
@@ -724,7 +725,7 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
   { key: "max_logs_per_day", label: "Most logs kept per day", help: "The oldest of a day's logs beyond this are deleted.", kind: "int", def: "15" },
 ];
 
-let settings: Settings = { theme: "system", check_updates: true, linux_util: {} };
+let settings: Settings = { theme: "system", check_updates: true, beta_updates: false, linux_util: {} };
 
 function applyTheme(theme: Theme) {
   if (theme === "system") delete document.documentElement.dataset.theme;
@@ -734,6 +735,7 @@ function applyTheme(theme: Theme) {
 function fillSettings(s: Settings) {
   $<HTMLSelectElement>("theme").value = s.theme;
   $<HTMLInputElement>("checkupdates").checked = s.check_updates;
+  $<HTMLInputElement>("betaupdates").checked = s.beta_updates;
   const fields = LU_FIELDS.map((f) => {
     const value = s.linux_util[f.key] ?? f.def;
     const label = document.createElement("label");
@@ -775,6 +777,7 @@ function readSettings(): Settings {
   return {
     theme: $<HTMLSelectElement>("theme").value as Theme,
     check_updates: $<HTMLInputElement>("checkupdates").checked,
+    beta_updates: $<HTMLInputElement>("betaupdates").checked,
     linux_util,
   };
 }
@@ -784,7 +787,7 @@ $("opensettings").addEventListener("click", () => {
   fillSettings(settings);
   $<HTMLDialogElement>("settings").showModal();
 });
-$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, linux_util: {} }));
+$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, beta_updates: false, linux_util: {} }));
 $("settingscancel").addEventListener("click", () => $<HTMLDialogElement>("settings").close());
 $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
   ev.preventDefault();

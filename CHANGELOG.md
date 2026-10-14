@@ -13,6 +13,16 @@ release is cut.
 
 ### Added
 
+- **Beta updates**: the Release workflow can now be started by hand on `dev`
+  (Actions → Release → Run workflow); it publishes the AppImage,
+  `.deb` and `.rpm` as a **beta** pre-release, tagged
+  `v<version>-beta.<run number>`. Releases from `main` are now labelled
+  **stable**. A new Settings option, **Include beta versions**, makes the
+  update check and **Install update** follow the newest release including
+  betas; turning it off goes back to stable only. A beta shows as
+  `0.2.1-beta.12` in the bottom line, and a stable release is offered to a
+  beta of the same version.
+
 - **Description panel**: a panel under the list shows linux_util's description
   of the highlighted utility (by keyboard or mouse), as its menu does, and
   search matches descriptions too. linux_util's `--list --json` does not

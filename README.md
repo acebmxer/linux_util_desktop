@@ -59,13 +59,16 @@ for questions the package manager itself asks, such as dnf's `Is this ok
 [y/N]` or apt's `Do you want to continue? [Y/n]` during **System Updates**.
 
 The window's bottom line shows the app version and the bundled linux_util
-version. On launch the app looks at this project's latest GitHub release and, if
-it is newer, shows a bar with the release notes and an **Install update**
+version. On launch the app looks at this project's latest stable GitHub release
+(or, with **Include beta versions** on in Settings, the newest release including
+betas) and, if it is newer, shows a bar with the release notes and an **Install update**
 button (turn the launch check off in Settings; **Check for updates** checks on
 demand). Nothing is downloaded until you click. The matching file is checked
 against the release's `SHA256SUMS` first, then a `.deb` or `.rpm` is installed
 with apt-get, dnf or zypper through the same password dialog as the other
 actions, or an AppImage file is replaced in place. Restart the app afterwards.
+Turning beta versions off goes back to stable releases only; a beta already
+installed stays until a newer stable release comes out.
 A copy that was not installed from a release file (a source checkout) only
 shows the notice.
 
@@ -148,8 +151,12 @@ installs need.
 
 When the version in `src-tauri/tauri.conf.json` changes on `main`, the Release
 workflow builds all three on Ubuntu 22.04, installs each in clean containers
-and attaches them to a **draft** GitHub release for that version. Publishing
-the draft creates the tag, so the files are already there.
+and attaches them to a **draft** GitHub release for that version, marked
+**stable**. Publishing the draft creates the tag, so the files are already
+there. Running the workflow by hand on `dev` (Actions → Release → Run workflow)
+publishes a **beta** pre-release at once, tagged `v<version>-beta.<run number>`,
+for testing the real packages before the PR to `main`. Betas are never
+"latest"; the app offers them only when **Include beta versions** is on.
 
 To build and smoke-test locally (needs podman or docker for the tests):
 

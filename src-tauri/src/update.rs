@@ -1,6 +1,8 @@
 //! Version information and updating the app from its GitHub releases.
 //!
-//! The check reads the latest release of this repo. Installing downloads the
+//! The check reads the latest stable release of this repo, or, when the
+//! "beta updates" setting is on, the newest release including beta
+//! pre-releases. Installing downloads the
 //! file that matches how the app was installed, checks it against the
 //! release's `SHA256SUMS`, and then either hands a `.deb` or `.rpm` to the
 //! system package manager through the same password dialog the install actions
@@ -27,6 +29,15 @@ const SUMS_NAME: &str = "SHA256SUMS";
 /// Largest download accepted: the AppImage is well under this.
 const MAX_DOWNLOAD: u64 = 1 << 30;
 const MAX_NOTES: usize = 20_000;
+/// Set by the dev-branch release build to its workflow run number; a stable
+/// build has none. It tells the update check which beta this copy is.
+const BETA_BUILD: Option<&str> = option_env!("LU_BETA_BUILD");
+/// Sorts a stable release above every beta of the same version.
+const STABLE: u64 = u64::MAX;
+
+/// A release's place in time: version numbers, then beta number (`STABLE` for
+/// a stable release).
+type Rank = ((u64, u64, u64), u64);
 
 #[derive(Serialize)]
 pub struct VersionInfo {
@@ -48,6 +59,9 @@ pub struct Update {
 
 struct Release {
     version: String,
+    /// The tag without its `v`, such as `0.2.1` or `0.2.1-beta.12`.
+    label: String,
+    rank: Rank,
     notes: String,
     page: String,
     /// (file name, download address)
@@ -85,6 +99,36 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(v)
 }
 
+/// A release tag as a `Rank`: `v0.2.1` is stable, `v0.2.1-beta.12` is beta 12,
+/// any other pre-release suffix sorts below every beta.
+fn parse_release(tag: &str) -> Option<Rank> {
+    let version = parse_version(tag)?;
+    let tag = tag.trim().trim_start_matches('v');
+    let beta = match tag.split_once('-') {
+        None => STABLE,
+        Some((_, pre)) => pre
+            .strip_prefix("beta.")
+            .and_then(|n| n.split('+').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+    };
+    Some((version, beta))
+}
+
+/// The running app's `Rank` from its version and its beta build number, if any.
+fn running_rank(version: &str, beta: Option<&str>) -> Option<Rank> {
+    let version = parse_version(version)?;
+    Some((version, beta.and_then(|n| n.parse().ok()).unwrap_or(STABLE)))
+}
+
+/// The running app's version as shown: `0.2.1`, or `0.2.1-beta.12` for a beta build.
+fn running_label(version: &str, beta: Option<&str>) -> String {
+    match beta.and_then(|n| n.parse::<u64>().ok()) {
+        Some(n) => format!("{version}-beta.{n}"),
+        None => version.to_string(),
+    }
+}
+
 fn agent(download: bool) -> ureq::Agent {
     let builder = ureq::Agent::config_builder().user_agent(format!("linux-util-desktop/{}", env!("CARGO_PKG_VERSION")));
     let builder = if download {
@@ -96,9 +140,11 @@ fn agent(download: bool) -> ureq::Agent {
     builder.build().into()
 }
 
-fn releases_url() -> (String, bool) {
+fn releases_url(beta: bool) -> (String, bool) {
     match std::env::var(RELEASES_URL_ENV) {
         Ok(url) if !url.is_empty() => (url, true),
+        // `latest` never returns a pre-release; the list does.
+        _ if beta => (format!("https://api.github.com/repos/{REPO}/releases?per_page=30"), false),
         _ => (format!("https://api.github.com/repos/{REPO}/releases/latest"), false),
     }
 }
@@ -108,20 +154,10 @@ fn download_allowed(url: &str, overridden: bool) -> bool {
     overridden || url.starts_with(&format!("https://github.com/{REPO}/releases/download/"))
 }
 
-fn fetch_release() -> Result<Release, String> {
-    let (url, overridden) = releases_url();
-    let mut response = agent(false)
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| format!("Could not check for updates: {e}"))?;
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("Could not read the release information: {e}"))?;
-    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
+fn release_from(doc: &serde_json::Value, overridden: bool) -> Result<Release, String> {
     let tag = doc["tag_name"].as_str().ok_or("The release has no tag")?;
-    let (major, minor, patch) = parse_version(tag).ok_or_else(|| format!("Cannot read the release version {tag}"))?;
+    let rank = parse_release(tag).ok_or_else(|| format!("Cannot read the release version {tag}"))?;
+    let ((major, minor, patch), _) = rank;
     let assets = doc["assets"]
         .as_array()
         .map(|list| {
@@ -133,10 +169,37 @@ fn fetch_release() -> Result<Release, String> {
         .unwrap_or_default();
     Ok(Release {
         version: format!("{major}.{minor}.{patch}"),
+        label: tag.trim().trim_start_matches('v').to_string(),
+        rank,
         notes: doc["body"].as_str().unwrap_or("").chars().take(MAX_NOTES).collect(),
         page: doc["html_url"].as_str().unwrap_or("").to_string(),
         assets,
     })
+}
+
+/// The newest release of the chosen channel: the latest stable one, or the
+/// newest of all (betas included) when `beta` is set.
+fn fetch_release(beta: bool) -> Result<Release, String> {
+    let (url, overridden) = releases_url(beta);
+    let mut response = agent(false)
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("Could not check for updates: {e}"))?;
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Could not read the release information: {e}"))?;
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
+    match doc.as_array() {
+        None => release_from(&doc, overridden),
+        Some(list) => list
+            .iter()
+            .filter(|d| d["draft"].as_bool() != Some(true))
+            .filter_map(|d| release_from(d, overridden).ok())
+            .max_by_key(|r| r.rank)
+            .ok_or_else(|| "No releases were found".to_string()),
+    }
 }
 
 fn install_method() -> Result<Method, String> {
@@ -322,17 +385,25 @@ fn replace_appimage(plan: &Plan, target: &Path, app: &AppHandle) -> Result<(), S
         .map_err(|e| format!("Could not replace {}: {e}", target.display()))
 }
 
-fn package_command(method: &Method, file: &Path) -> Command {
+/// `reinstall` is for a file with the same package version as the installed
+/// one (a newer beta of the same version): a plain install would do nothing.
+fn package_command(method: &Method, file: &Path, reinstall: bool) -> Command {
     let mut cmd = Command::new("sudo");
     match method {
         Method::Deb => {
             cmd.env("DEBIAN_FRONTEND", "noninteractive").args(["apt-get", "install", "-y"]);
+            if reinstall {
+                cmd.arg("--reinstall");
+            }
         }
         Method::Rpm("zypper") => {
             cmd.args(["zypper", "--non-interactive", "install", "--allow-unsigned-rpm"]);
+            if reinstall {
+                cmd.arg("--force");
+            }
         }
         _ => {
-            cmd.args(["dnf", "install", "-y"]);
+            cmd.args(["dnf", if reinstall { "reinstall" } else { "install" }, "-y"]);
         }
     }
     cmd.arg(file);
@@ -342,6 +413,9 @@ fn package_command(method: &Method, file: &Path) -> Command {
 
 fn run_update(app: &AppHandle, version: &str) {
     let label = format!("Linux_Util Desktop {version}");
+    let beta = crate::settings::beta_updates(app);
+    let installed = app.package_info().version.to_string();
+    let mut reinstall = false;
     let names = [label.clone()];
     // A step that fails because Cancel was pressed ends the run as cancelled.
     let fail = |message: String| {
@@ -355,10 +429,11 @@ fn run_update(app: &AppHandle, version: &str) {
     };
     actions::emit_item(app, 0, &label, "running", None);
     actions::emit_output(app, "Checking the latest release", false);
-    let plan = match fetch_release().and_then(|release| {
-        if release.version != version {
-            return Err(format!("Version {} is now the latest, not {version}. Check for updates again.", release.version));
+    let plan = match fetch_release(beta).and_then(|release| {
+        if release.label != version {
+            return Err(format!("Version {} is now the latest, not {version}. Check for updates again.", release.label));
         }
+        reinstall = release.version == installed;
         plan(&release)
     }) {
         Ok(p) => p,
@@ -388,7 +463,7 @@ fn run_update(app: &AppHandle, version: &str) {
             if actions::is_cancelled(app) {
                 return fail("Cancelled".to_string());
             }
-            actions::run_queue(app, &names, &|_| package_command(method, &file));
+            actions::run_queue(app, &names, &|_| package_command(method, &file, reinstall));
         }
     }
 }
@@ -401,30 +476,32 @@ pub fn version_info(app: AppHandle) -> VersionInfo {
         .and_then(|script| std::fs::read_to_string(script.with_file_name("linux_util.VERSION")).ok())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
-    VersionInfo { app: app.package_info().version.to_string(), linux_util }
+    VersionInfo { app: running_label(&app.package_info().version.to_string(), BETA_BUILD), linux_util }
 }
 
-/// The latest release when it is newer than the running app, else `None`.
+/// The newest release of the chosen channel when it is newer than the running
+/// app, else `None`.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Option<Update>, String> {
+    let beta = crate::settings::beta_updates(&app);
     tauri::async_runtime::spawn_blocking(move || {
-        let release = fetch_release()?;
-        let current = parse_version(&app.package_info().version.to_string()).ok_or("Cannot read the app version")?;
-        if parse_version(&release.version) <= Some(current) {
+        let release = fetch_release(beta)?;
+        let current = running_rank(&app.package_info().version.to_string(), BETA_BUILD).ok_or("Cannot read the app version")?;
+        if release.rank <= current {
             return Ok(None);
         }
         let (can_install, note) = match plan(&release) {
             Ok(p) => (true, p.describe()),
             Err(e) => (false, e),
         };
-        Ok(Some(Update { version: release.version, notes: release.notes, page: release.page, can_install, note }))
+        Ok(Some(Update { version: release.label, notes: release.notes, page: release.page, can_install, note }))
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 /// Installs release `version`, as a run in the action panel. The run starts
-/// at once, so Cancel works from the first moment; it fails when the latest
+/// at once, so Cancel works from the first moment; it fails when the newest
 /// release is no longer the one the user was shown.
 #[tauri::command]
 pub fn install_update(app: AppHandle, state: State<'_, RunState>, version: String) -> Result<(), String> {
@@ -443,6 +520,44 @@ mod tests {
         assert_eq!(parse_version("1.0"), None);
         assert_eq!(parse_version("1.0.0.1"), None);
         assert_eq!(parse_version("latest"), None);
+    }
+
+    #[test]
+    fn releases_rank_stable_above_their_betas() {
+        let r = |t| parse_release(t).unwrap();
+        assert!(r("v0.2.1") > r("v0.2.1-beta.12"));
+        assert!(r("v0.2.1-beta.12") > r("v0.2.1-beta.9"));
+        assert!(r("v0.2.1-beta.1") > r("v0.2.0"));
+        assert!(r("v0.2.1-rc1") < r("v0.2.1-beta.1"));
+        assert_eq!(parse_release("latest"), None);
+    }
+
+    #[test]
+    fn running_app_ranks_like_its_release() {
+        let stable = running_rank("0.2.1", None);
+        let beta = running_rank("0.2.1", Some("12"));
+        assert_eq!(stable, parse_release("v0.2.1"));
+        assert_eq!(beta, parse_release("v0.2.1-beta.12"));
+        // An empty build variable (a stable build) is not a beta.
+        assert_eq!(running_rank("0.2.1", Some("")), stable);
+        assert_eq!(running_label("0.2.1", Some("12")), "0.2.1-beta.12");
+        assert_eq!(running_label("0.2.1", Some("")), "0.2.1");
+    }
+
+    #[test]
+    fn newest_release_wins_and_drafts_are_skipped() {
+        let doc = |tag: &str, draft: bool| serde_json::json!({"tag_name": tag, "draft": draft});
+        let list = serde_json::json!([doc("v0.2.1-beta.3", false), doc("v0.2.1", true), doc("v0.2.1-beta.2", false), doc("v0.2.0", false)]);
+        let best = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["draft"].as_bool() != Some(true))
+            .filter_map(|d| release_from(d, false).ok())
+            .max_by_key(|r| r.rank)
+            .unwrap();
+        assert_eq!(best.label, "0.2.1-beta.3");
+        assert_eq!(best.version, "0.2.1");
     }
 
     #[test]
