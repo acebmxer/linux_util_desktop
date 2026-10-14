@@ -3,8 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 5 (packaging and release) complete once `v0.1.0` is tagged.
-Next: Stage 6.**
+**Current stage: 5 (packaging and release) complete. Next: Stage 6.**
 
 ## Decisions made
 
@@ -107,7 +106,7 @@ Goal: installable builds on other distros.
 - [x] Declare the WebKitGTK dependency in `.deb` and `.rpm`: Tauri adds WebKitGTK and GTK itself (the `.rpm` by soname, so it resolves on openSUSE too); `bash` and `sudo` added
 - [x] Release workflow on tag push, with checksums (`release.yml`: tag must match the app version, draft release; not yet run on GitHub)
 - [x] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE (`scripts/smoke_test.sh`, also a job in `release.yml`; run locally with podman, all four pass)
-- [ ] First tagged release `v0.1.0` (version set and changelog dated 2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45; tag still to push)
+- [x] First tagged release `v0.1.0` (2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45. The release was published by hand before the workflow finished, so its files were attached afterwards; `release.yml` now uploads to an existing release)
 
 Found while testing: the AppImage's launcher points `LD_LIBRARY_PATH`, `PATH`
 and the GTK/GIO paths into the bundle, so on Arch `curl`, `git` and `pacman`
