@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+*.AppImage
+*.deb
+*.rpm
+.DS_Store
+*.log
