@@ -3,8 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 5 (packaging and release) complete once `v0.1.0` is tagged.
-Next: Stage 6.**
+**Current stage: 7 (version and updates) complete. All planned stages are done.**
 
 ## Decisions made
 
@@ -56,7 +55,7 @@ Fallback if it does not: run the script inside a PTY and answer the prompt.
 ### Stage 0: Groundwork (done)
 - [x] Repo created at `~/Projects/github/linux_util_desktop`
 - [x] README, PLAN, CLI contract, LICENSE, .gitignore
-- [ ] First commit and GitHub repo (waiting on go-ahead)
+- [x] First commit and GitHub repo (`acebmxer/linux_util_desktop`; v0.1.0 released 2026-10-14)
 
 ### Stage 1: Skeleton
 Goal: an empty Linux_Util Desktop window that builds and launches.
@@ -107,7 +106,7 @@ Goal: installable builds on other distros.
 - [x] Declare the WebKitGTK dependency in `.deb` and `.rpm`: Tauri adds WebKitGTK and GTK itself (the `.rpm` by soname, so it resolves on openSUSE too); `bash` and `sudo` added
 - [x] Release workflow on tag push, with checksums (`release.yml`: tag must match the app version, draft release; not yet run on GitHub)
 - [x] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE (`scripts/smoke_test.sh`, also a job in `release.yml`; run locally with podman, all four pass)
-- [ ] First tagged release `v0.1.0` (version set and changelog dated 2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45; tag still to push)
+- [x] First tagged release `v0.1.0` (2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45. The release was published by hand before the workflow finished, so its files were attached afterwards; `release.yml` now uploads to an existing release)
 
 Found while testing: the AppImage's launcher points `LD_LIBRARY_PATH`, `PATH`
 and the GTK/GIO paths into the bundle, so on Arch `curl`, `git` and `pacman`
@@ -118,11 +117,23 @@ path. Checked on Arch: a full Parallel Downloads install from the AppImage,
 password dialog included, succeeded and showed Installed.
 
 ### Stage 6: Polish
-- [ ] Profiles (`--export-profile`, `--import-profile`)
-- [ ] Update-all button
-- [ ] Log viewer for linux_util's logs
-- [ ] Settings (config file, theme)
-- [ ] Accessibility and keyboard navigation (match the TUI keys where sensible)
+- [x] Profiles (`--export-profile`, `--import-profile`): a Profiles dialog lists linux_util's built-in profiles (read with `--export-profile`); choosing one replaces the selection, leaving out names this distro does not offer. Import reads a profile file (one profile is selected at once, several are listed); export saves the selection as a one-profile file. The app applies profiles through its own queue, not `--import-profile`, so each utility gets its own status; its exported files still work with `--import-profile` (checked with `--dry-run`). Tested in an Ubuntu 22.04 container under a virtual display, not on a real desktop
+- [x] Update-all button: in the action bar, always shown; one `--update-all` run with the dry-run toggle (dry run checked in the container)
+- [x] Log viewer for linux_util's logs: the `logs/` folder of the per-user copy actions run from, newest first, `*_latest.log` links left out, long logs shown from the end. Staging that copy no longer copies the bundled `logs/` (a source checkout's `--list` logs were showing up)
+- [x] Settings (config file, theme): theme (system, light, dark) and the five linux_util config keys the app's runs read (`auto_confirm`, `verbose`, `debug`, `log_retention_days`, `max_logs_per_day`), kept in the app config folder; `linux_util.conf` there holds only changed keys and is passed in `LINUX_UTIL_CONFIG_FILE`. Retry, DNS and disk-space keys are left out: only the terminal menu reads them
+- [x] Accessibility and keyboard navigation: TUI keys `/`, Esc, arrows, Space, A, D (Enter, U and Q left out: a stray key should not start an install or close the window); the list is one tab stop, labelled controls and dialogs, live status text, visible focus
+
+All of Stage 6 tested in an Ubuntu 22.04 container under a virtual display, not on a real desktop.
+
+### Stage 7: Version and updates
+Goal: see which version is running, and get a newer release from inside the app.
+- [x] Show the app version and the bundled linux_util version (`vendor/linux_util.VERSION`) in the window (bottom line)
+- [x] Check the GitHub releases of this repo for a newer version on launch, with a Settings switch to turn the check off; show what changed (a bar, and a dialog with the release notes; a "Check for updates" link checks on demand)
+- [x] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`
+
+Tested against a local stand-in for the GitHub release (`LU_RELEASES_URL`, which also lifts the download address check, for testing only) in containers under a virtual display, with real 0.1.0 and 0.2.0 builds: `.deb` on Ubuntu 22.04, `.rpm` on Fedora and openSUSE, AppImage on Ubuntu 22.04. Each took 0.1.0 to 0.2.0; a wrong checksum installed nothing; a read-only AppImage folder failed with a message. Not tested: Arch, or against the real GitHub API.
+
+A newer linux_util arrives in a new app release (open question 4): the app updates as a whole, unlike linux_util's own `git pull` self-update.
 
 ### Later (not committed to)
 - Update check on launch that offers a newer linux_util

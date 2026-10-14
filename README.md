@@ -13,10 +13,18 @@ utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.
 
 > **Status: early development.** The app lists every utility with its install
-> status, and installs, uninstalls and updates them. Downloads are on the
+> status, installs, uninstalls and updates them (one, a selection, or everything
+> installed), selects them from profiles, shows linux_util's logs, and has a
+> Settings window and keyboard shortcuts. Downloads are on the
 > [Releases](https://github.com/acebmxer/linux_util_desktop/releases) page. See
 > [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work currently
 > stands.
+
+## Download
+
+Get the AppImage, `.deb` or `.rpm` from the
+[latest release](https://github.com/acebmxer/linux_util_desktop/releases/latest).
+[Packaging](#packaging) says which file to pick.
 
 ## What it is (and isn't)
 
@@ -29,8 +37,37 @@ non-interactive flags:
 | Show utilities and install status | `linux_util.sh --list --json` |
 | Install (Apply for system tasks) | `linux_util.sh --install <name>` |
 | Uninstall (Revert for system tasks) | `linux_util.sh --uninstall <name>` |
-| Update one / all | `linux_util.sh --update <name>` / `--update-all` |
+| Update selected / Update all | `linux_util.sh --update <name>` / `--update-all` |
 | Preview without changing anything | adds `--dry-run` |
+| Profiles built into linux_util | `linux_util.sh --export-profile` |
+| Logs | reads the `logs/` folder linux_util writes |
+| Settings for linux_util | writes a `linux_util.conf`, passed in `LINUX_UTIL_CONFIG_FILE` |
+
+Choosing a profile only selects its utilities; they then run through the
+same install and update actions. Profile files are imported and exported in
+linux_util's own format, so a file saved by the app can be applied on another
+machine with `linux_util.sh --import-profile <file>`.
+
+Settings has a theme (follow the system, light or dark) and the linux_util
+options that affect the app's runs: answering yes to installer questions
+(without a terminal they are answered no), verbose and debug output, and how
+long logs are kept. They are saved in the app's config folder
+(`~/.config/io.github.acebmxer.linux-util-desktop/`).
+
+The window's bottom line shows the app version and the bundled linux_util
+version. On launch the app looks at this project's latest GitHub release and, if
+it is newer, shows a bar with the release notes and an **Install update**
+button (turn the launch check off in Settings; **Check for updates** checks on
+demand). Nothing is downloaded until you click. The matching file is checked
+against the release's `SHA256SUMS` first, then a `.deb` or `.rpm` is installed
+with apt-get, dnf or zypper through the same password dialog as the other
+actions, or an AppImage file is replaced in place. Restart the app afterwards.
+A copy that was not installed from a release file (a source checkout) only
+shows the notice.
+
+Keyboard, following linux_util's terminal menu: `/` search, `Esc` clear the
+search, `↑` `↓` `Home` `End` move through the list, `Space` select, `←` `→`
+previous or next category, `A` select all shown, `D` deselect all.
 
 Because the menu is built from `--list --json`, new utilities added to
 `linux_util` appear in the app as soon as its bundled copy is updated. No GUI
@@ -107,7 +144,8 @@ installs need.
 
 Pushing a `v*` tag runs the Release workflow: it builds all three on Ubuntu
 22.04, checks the tag matches the version in `src-tauri/tauri.conf.json`,
-installs each in clean containers and attaches them to a draft GitHub release.
+installs each in clean containers and attaches them to the tag's GitHub
+release (created as a draft if it does not exist yet).
 
 To build and smoke-test locally (needs podman or docker for the tests):
 

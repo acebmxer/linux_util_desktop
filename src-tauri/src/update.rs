@@ -1,0 +1,436 @@
+//! Version information and updating the app from its GitHub releases.
+//!
+//! The check reads the latest release of this repo. Installing downloads the
+//! file that matches how the app was installed, checks it against the
+//! release's `SHA256SUMS`, and then either hands a `.deb` or `.rpm` to the
+//! system package manager through the same password dialog the install actions
+//! use, or replaces the AppImage file in place. Nothing is downloaded without a
+//! click, and no checksum means no install.
+
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Manager, State};
+
+use crate::actions::{self, RunState};
+
+const REPO: &str = "acebmxer/linux_util_desktop";
+/// Replaces the GitHub API address for the release check and lifts the
+/// download address restriction. Only for testing against a local server.
+const RELEASES_URL_ENV: &str = "LU_RELEASES_URL";
+const SUMS_NAME: &str = "SHA256SUMS";
+/// Largest download accepted: the AppImage is well under this.
+const MAX_DOWNLOAD: u64 = 1 << 30;
+const MAX_NOTES: usize = 20_000;
+
+#[derive(Serialize)]
+pub struct VersionInfo {
+    app: String,
+    /// The bundled linux_util release (`vendor/linux_util.VERSION`).
+    linux_util: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Update {
+    version: String,
+    /// The release notes as written on GitHub (plain text, not rendered).
+    notes: String,
+    page: String,
+    can_install: bool,
+    /// How the update would be installed, or why it cannot be from here.
+    note: String,
+}
+
+struct Release {
+    version: String,
+    notes: String,
+    page: String,
+    /// (file name, download address)
+    assets: Vec<(String, String)>,
+}
+
+enum Method {
+    AppImage(PathBuf),
+    Deb,
+    /// The package manager's program: `dnf` or `zypper`.
+    Rpm(&'static str),
+}
+
+struct Plan {
+    method: Method,
+    file: (String, String),
+    sums: String,
+}
+
+impl Plan {
+    fn describe(&self) -> String {
+        match &self.method {
+            Method::AppImage(path) => format!("Replaces the AppImage at {}.", path.display()),
+            Method::Deb => "Installs the .deb with apt-get; asks for your password.".to_string(),
+            Method::Rpm(pm) => format!("Installs the .rpm with {pm}; asks for your password."),
+        }
+    }
+}
+
+/// `1.2.3` or `v1.2.3` as numbers. A pre-release or build suffix is ignored.
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let core = text.trim().trim_start_matches('v').split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+    let v = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(v)
+}
+
+fn agent(download: bool) -> ureq::Agent {
+    let builder = ureq::Agent::config_builder().user_agent(format!("linux-util-desktop/{}", env!("CARGO_PKG_VERSION")));
+    let builder = if download {
+        // A big file on a slow line is fine; a stalled connection is not.
+        builder.timeout_connect(Some(Duration::from_secs(15))).timeout_recv_response(Some(Duration::from_secs(30)))
+    } else {
+        builder.timeout_global(Some(Duration::from_secs(20)))
+    };
+    builder.build().into()
+}
+
+fn releases_url() -> (String, bool) {
+    match std::env::var(RELEASES_URL_ENV) {
+        Ok(url) if !url.is_empty() => (url, true),
+        _ => (format!("https://api.github.com/repos/{REPO}/releases/latest"), false),
+    }
+}
+
+/// Files may only come from this repo's own releases (unless testing).
+fn download_allowed(url: &str, overridden: bool) -> bool {
+    overridden || url.starts_with(&format!("https://github.com/{REPO}/releases/download/"))
+}
+
+fn fetch_release() -> Result<Release, String> {
+    let (url, overridden) = releases_url();
+    let mut response = agent(false)
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("Could not check for updates: {e}"))?;
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Could not read the release information: {e}"))?;
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
+    let tag = doc["tag_name"].as_str().ok_or("The release has no tag")?;
+    let (major, minor, patch) = parse_version(tag).ok_or_else(|| format!("Cannot read the release version {tag}"))?;
+    let assets = doc["assets"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|a| Some((a["name"].as_str()?.to_string(), a["browser_download_url"].as_str()?.to_string())))
+                .filter(|(_, url)| download_allowed(url, overridden))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Release {
+        version: format!("{major}.{minor}.{patch}"),
+        notes: doc["body"].as_str().unwrap_or("").chars().take(MAX_NOTES).collect(),
+        page: doc["html_url"].as_str().unwrap_or("").to_string(),
+        assets,
+    })
+}
+
+fn install_method() -> Result<Method, String> {
+    if let Some(path) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Ok(Method::AppImage(path));
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the running app: {e}"))?;
+    if !exe.starts_with("/usr/") {
+        return Err("This copy was not installed from a release file, so it cannot update itself.".to_string());
+    }
+    if actions::find_in_path("apt-get").is_some() {
+        Ok(Method::Deb)
+    } else if actions::find_in_path("dnf").is_some() {
+        Ok(Method::Rpm("dnf"))
+    } else if actions::find_in_path("zypper").is_some() {
+        Ok(Method::Rpm("zypper"))
+    } else {
+        Err("No supported package manager (apt-get, dnf or zypper) was found.".to_string())
+    }
+}
+
+fn plan(release: &Release) -> Result<Plan, String> {
+    if std::env::consts::ARCH != "x86_64" {
+        return Err("Releases are built for x86_64 only.".to_string());
+    }
+    let method = install_method()?;
+    let v = &release.version;
+    let name = match &method {
+        Method::AppImage(_) => format!("linux_util_desktop_{v}_amd64.AppImage"),
+        Method::Deb => format!("linux_util_desktop_{v}_amd64.deb"),
+        Method::Rpm(_) => format!("linux_util_desktop-{v}-1.x86_64.rpm"),
+    };
+    let find = |wanted: &str| release.assets.iter().find(|(n, _)| n == wanted).cloned();
+    let file = find(&name).ok_or_else(|| format!("Release {v} has no {name}."))?;
+    let sums = find(SUMS_NAME).ok_or_else(|| format!("Release {v} has no {SUMS_NAME}, so the download cannot be checked."))?;
+    Ok(Plan { method, file, sums: sums.1 })
+}
+
+/// The hash `sums` (the `sha256sum` format) lists for `name`.
+fn expected_hash(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.split_once(char::is_whitespace)?;
+        let file = file.trim_start().trim_start_matches('*');
+        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn sha256_of(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Downloads `url` to `dest`, reporting progress in tenths when the size is known.
+fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
+    let mut response = agent(true).get(url).call().map_err(|e| format!("Download failed: {e}"))?;
+    let total = response.body().content_length();
+    let mut reader = response.body_mut().with_config().limit(MAX_DOWNLOAD).reader();
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+    let (mut done, mut reported) = (0u64, 0u64);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("Download failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+        done += n as u64;
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let tenth = done * 10 / total;
+            if tenth > reported {
+                reported = tenth;
+                actions::emit_output(app, &format!("  {}%", tenth * 10), false);
+            }
+        }
+    }
+    file.flush().map_err(|e| format!("Could not write {}: {e}", dest.display()))
+}
+
+/// Downloads the plan's file next to `dest_dir`'s `file_name` and checks it
+/// against the release's checksums. Returns the verified file's path.
+fn fetch_verified(app: &AppHandle, plan: &Plan, dest_dir: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let (name, url) = &plan.file;
+    actions::emit_output(app, &format!("Downloading {SUMS_NAME}"), false);
+    let sums = agent(false)
+        .get(&plan.sums)
+        .call()
+        .and_then(|mut r| r.body_mut().read_to_string())
+        .map_err(|e| format!("Could not download {SUMS_NAME}: {e}"))?;
+    let expected = expected_hash(&sums, name).ok_or_else(|| format!("{SUMS_NAME} does not list {name}."))?;
+    actions::emit_output(app, &format!("Downloading {name}"), false);
+    let dest = dest_dir.join(file_name);
+    download(app, url, &dest)?;
+    actions::emit_output(app, "Checking the download against the checksum", false);
+    let actual = sha256_of(&dest).map_err(|e| format!("Could not read {}: {e}", dest.display()))?;
+    if actual != expected {
+        let _ = std::fs::remove_file(&dest);
+        return Err(format!("The download does not match its checksum (expected {expected}, got {actual}). Nothing was installed."));
+    }
+    actions::emit_output(app, &format!("Checksum matches ({expected})"), false);
+    Ok(dest)
+}
+
+/// A private (mode 0700) folder for the download, removed afterwards. The file
+/// is installed as root, so nobody else may be able to swap it after the check.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn create(app: &AppHandle) -> Result<Self, String> {
+        let base = app.path().app_cache_dir().map_err(|e| format!("No cache directory: {e}"))?;
+        std::fs::create_dir_all(&base).map_err(|e| format!("Could not create {}: {e}", base.display()))?;
+        let dir = base.join(format!("update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        Ok(Scratch(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Puts the verified AppImage over the running one. A rename within one folder
+/// is atomic, and the running copy keeps working until the app is restarted.
+fn replace_appimage(plan: &Plan, target: &Path, app: &AppHandle) -> Result<(), String> {
+    let dir = target.parent().ok_or("The AppImage has no folder")?;
+    let staged = fetch_verified(app, plan, dir, &format!(".{}.update", plan.file.0))?;
+    let result = std::fs::metadata(target)
+        .map(|m| m.permissions().mode() & 0o777 | 0o755)
+        .and_then(|mode| std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode)))
+        .and_then(|_| std::fs::rename(&staged, target))
+        .map_err(|e| format!("Could not replace {}: {e}", target.display()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
+
+fn package_command(method: &Method, file: &Path) -> Command {
+    let mut cmd = Command::new("sudo");
+    match method {
+        Method::Deb => {
+            cmd.env("DEBIAN_FRONTEND", "noninteractive").args(["apt-get", "install", "-y"]);
+        }
+        Method::Rpm("zypper") => {
+            cmd.args(["zypper", "--non-interactive", "install", "--allow-unsigned-rpm"]);
+        }
+        _ => {
+            cmd.args(["dnf", "install", "-y"]);
+        }
+    }
+    cmd.arg(file);
+    crate::use_host_env(&mut cmd);
+    cmd
+}
+
+fn run_update(app: &AppHandle, plan: &Plan, version: &str) {
+    let label = format!("Linux_Util Desktop {version}");
+    let names = [label.clone()];
+    let fail = |message: String| {
+        actions::emit_output(app, &message, true);
+        actions::emit_item(app, 0, &label, "failed", None);
+        actions::emit_done(app, 0, 1, false);
+    };
+    match &plan.method {
+        Method::AppImage(target) => {
+            actions::emit_item(app, 0, &label, "running", None);
+            match replace_appimage(plan, target, app) {
+                Ok(()) => {
+                    actions::emit_output(app, &format!("Replaced {}", target.display()), false);
+                    actions::emit_item(app, 0, &label, "ok", None);
+                    actions::emit_done(app, 1, 0, false);
+                }
+                Err(e) => fail(e),
+            }
+        }
+        method => {
+            let scratch = match Scratch::create(app) {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let file = match fetch_verified(app, plan, &scratch.0, &plan.file.0) {
+                Ok(f) => f,
+                Err(e) => return fail(e),
+            };
+            if actions::is_cancelled(app) {
+                actions::emit_item(app, 0, &label, "cancelled", None);
+                return actions::emit_done(app, 0, 0, true);
+            }
+            actions::run_queue(app, &names, &|_| package_command(method, &file));
+        }
+    }
+}
+
+/// The running version and the bundled linux_util version.
+#[tauri::command]
+pub fn version_info(app: AppHandle) -> VersionInfo {
+    let linux_util = crate::script_path(&app)
+        .ok()
+        .and_then(|script| std::fs::read_to_string(script.with_file_name("linux_util.VERSION")).ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    VersionInfo { app: app.package_info().version.to_string(), linux_util }
+}
+
+/// The latest release when it is newer than the running app, else `None`.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<Option<Update>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let release = fetch_release()?;
+        let current = parse_version(&app.package_info().version.to_string()).ok_or("Cannot read the app version")?;
+        if parse_version(&release.version) <= Some(current) {
+            return Ok(None);
+        }
+        let (can_install, note) = match plan(&release) {
+            Ok(p) => (true, p.describe()),
+            Err(e) => (false, e),
+        };
+        Ok(Some(Update { version: release.version, notes: release.notes, page: release.page, can_install, note }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Installs release `version`, as a run in the action panel. Refuses when the
+/// latest release is no longer the one the user was shown.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, RunState>, version: String) -> Result<(), String> {
+    let plan_and_version = tauri::async_runtime::spawn_blocking(move || {
+        let release = fetch_release()?;
+        if release.version != version {
+            return Err(format!("Version {} is now the latest, not {version}. Check for updates again.", release.version));
+        }
+        plan(&release).map(|p| (p, release.version))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    actions::spawn_run(&app, &state, move |app| run_update(app, &plan_and_version.0, &plan_and_version.1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_compare_as_numbers() {
+        assert_eq!(parse_version("v0.2.10"), Some((0, 2, 10)));
+        assert_eq!(parse_version("1.0.0-rc1"), Some((1, 0, 0)));
+        assert!(parse_version("0.10.0") > parse_version("0.9.9"));
+        assert_eq!(parse_version("1.0"), None);
+        assert_eq!(parse_version("1.0.0.1"), None);
+        assert_eq!(parse_version("latest"), None);
+    }
+
+    #[test]
+    fn checksum_lines() {
+        let hash = "a".repeat(64);
+        let sums = format!("{hash}  one.deb\n{}  *two.rpm\nshort  three\n", "B".repeat(64));
+        assert_eq!(expected_hash(&sums, "one.deb"), Some(hash));
+        assert_eq!(expected_hash(&sums, "two.rpm"), Some("b".repeat(64)));
+        assert_eq!(expected_hash(&sums, "three"), None);
+        assert_eq!(expected_hash(&sums, "missing"), None);
+        assert_eq!(expected_hash(&sums, "one"), None);
+    }
+
+    #[test]
+    fn only_this_repos_releases_download() {
+        let ok = format!("https://github.com/{REPO}/releases/download/v1.0.0/x.deb");
+        assert!(download_allowed(&ok, false));
+        assert!(!download_allowed("https://github.com/other/repo/releases/download/v1/x.deb", false));
+        assert!(!download_allowed("http://example.com/x.deb", false));
+        assert!(download_allowed("http://127.0.0.1:1/x.deb", true));
+    }
+
+    #[test]
+    fn hashes_a_file() {
+        let path = std::env::temp_dir().join(format!("lud-hash-{}", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let hash = sha256_of(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(hash, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+}

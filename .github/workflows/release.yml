@@ -2,9 +2,9 @@ name: Release
 
 # On a version tag: builds the AppImage, .deb and .rpm, installs each in clean
 # Ubuntu, Fedora, openSUSE and Arch containers (scripts/smoke_test.sh), then
-# attaches them with SHA256SUMS to a draft GitHub release. Publishing the draft
-# is left to a person. Builds on Ubuntu 22.04 so the AppImage needs no newer
-# glibc than that.
+# attaches them with SHA256SUMS to the tag's GitHub release. If that release
+# does not exist yet it is created as a draft, and publishing it is left to a
+# person. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than that.
 on:
   push:
     tags: ["v*"]
@@ -101,11 +101,17 @@ jobs:
           name: release
           path: release
 
-      - name: Create draft release
+      - name: Attach files to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "Linux_Util Desktop $GITHUB_REF_NAME" \
-            --notes "Checksums for every file are in SHA256SUMS."
+          # The release may already exist (published by hand while this ran).
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "Linux_Util Desktop $GITHUB_REF_NAME" \
+              --notes "Checksums for every file are in SHA256SUMS."
+          fi

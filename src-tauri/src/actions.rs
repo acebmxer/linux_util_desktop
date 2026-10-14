@@ -20,7 +20,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const OPS: [&str; 3] = ["install", "uninstall", "update"];
+const OPS: [&str; 4] = ["install", "uninstall", "update", "update-all"];
+/// The one queue entry an `update-all` run shows.
+const UPDATE_ALL_LABEL: &str = "All installed utilities";
 const SOCKET_ENV: &str = "LU_ASKPASS_SOCK";
 
 #[derive(Default)]
@@ -81,7 +83,7 @@ pub fn askpass_client() -> ! {
     std::process::exit(if code.is_some() { 0 } else { 1 });
 }
 
-fn find_in_path(program: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_path(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&crate::host_var("PATH")?)
         .map(|d| d.join(program))
         .find(|p| p.is_file())
@@ -223,13 +225,17 @@ fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, sto
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Copies `from` into `to`, leaving out top-level entries named in `skip`.
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
+        if skip.iter().any(|s| entry.file_name() == *s) {
+            continue;
+        }
         let (src, dst) = (entry.path(), to.join(entry.file_name()));
         if entry.file_type()?.is_dir() {
-            copy_tree(&src, &dst)?;
+            copy_tree(&src, &dst, &[])?;
         } else {
             std::fs::copy(&src, &dst)?;
         }
@@ -237,16 +243,21 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where actions run linux_util from; its `logs/` directory is inside.
+pub(crate) fn staged_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("No app data directory: {e}"))?
+        .join("linux_util"))
+}
+
 /// `linux_util.sh` writes `logs/` next to itself, and the bundled copy may sit
 /// in a read-only directory. Actions therefore run from a per-user copy in the
 /// app data directory, refreshed when the bundled version changes. `logs/` is kept.
 fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
     let src = bundled.parent().ok_or("Bundled linux_util.sh has no parent directory")?;
-    let dest = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("No app data directory: {e}"))?
-        .join("linux_util");
+    let dest = staged_dir(app)?;
     let version = std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default();
     let marker = dest.join(".staged-version");
     let current = std::fs::read_to_string(&marker).ok();
@@ -261,14 +272,16 @@ fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
                 let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
             }
         }
-        copy_tree(src, &dest).map_err(err)?;
+        // A source checkout's vendor/ collects logs from `--list` runs; they are
+        // not this copy's logs.
+        copy_tree(src, &dest, &["logs"]).map_err(err)?;
         std::fs::write(&marker, version.trim()).map_err(err)?;
     }
     Ok(dest.join("linux_util.sh"))
 }
 
 /// Drops ANSI escape sequences and keeps only what a carriage return left last.
-fn clean_line(raw: &[u8]) -> String {
+pub(crate) fn clean_line(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
     let text = text.trim_end_matches(['\n', '\r']);
     let text = text.rsplit('\r').next().unwrap_or("");
@@ -308,7 +321,31 @@ fn pump<R: Read + Send + 'static>(app: AppHandle, reader: R, stderr: bool) -> st
     })
 }
 
-fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run: bool) {
+/// Tells the UI a line of output. `stderr` lines show in the error colour.
+pub(crate) fn emit_output(app: &AppHandle, text: &str, stderr: bool) {
+    let _ = app.emit("run-output", Output { text, stderr });
+}
+
+/// Tells the UI the state of queue entry `index`.
+pub(crate) fn emit_item(app: &AppHandle, index: usize, name: &str, state: &str, code: Option<i32>) {
+    let _ = app.emit("run-item", ItemEvent { index, name, state, code });
+}
+
+/// Ends the run in the UI.
+pub(crate) fn emit_done(app: &AppHandle, ok: usize, failed: usize, cancelled: bool) {
+    let _ = app.emit("run-done", Done { ok, failed, cancelled });
+}
+
+/// True once the user pressed Cancel during the current run.
+pub(crate) fn is_cancelled(app: &AppHandle) -> bool {
+    app.state::<RunState>().inner.lock().unwrap().cancelled
+}
+
+/// Runs the commands `make` builds, one per name, with a `sudo` that asks the
+/// password through the app's own dialog. Emits the run events, including the
+/// final `run-done`. `make` returns the command before the environment for
+/// the shim is added.
+pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -> Command) {
     let state = app.state::<RunState>();
     let (mut ok, mut failed) = (0, 0);
 
@@ -319,8 +356,8 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
     let (real_sudo, work) = match setup {
         Ok(v) => v,
         Err(e) => {
-            let _ = app.emit("run-output", Output { text: &e, stderr: true });
-            let _ = app.emit("run-done", Done { ok: 0, failed: names.len(), cancelled: false });
+            emit_output(app, &e, true);
+            emit_done(app, 0, names.len(), false);
             return;
         }
     };
@@ -342,14 +379,8 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
             continue;
         }
         let _ = app.emit("run-item", ItemEvent { index, name, state: "running", code: None });
-        let mut cmd = Command::new("bash");
-        crate::use_host_env(&mut cmd);
-        cmd.arg(script);
-        if dry_run {
-            cmd.arg("--dry-run");
-        }
-        cmd.args(["--no-color", &format!("--{op}"), name])
-            .env("PATH", &path)
+        let mut cmd = make(name);
+        cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
             .stdin(Stdio::null())
@@ -359,7 +390,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let msg = format!("Could not start linux_util.sh: {e}");
+                let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
                 let _ = app.emit("run-output", Output { text: &msg, stderr: true });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
@@ -403,6 +434,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
 
 /// Starts a queue of `op` runs, one utility at a time. Progress arrives as the
 /// `run-item`, `run-output`, `askpass-request` and `run-done` events.
+/// `update-all` takes no names: it is one `--update-all` run.
 #[tauri::command]
 pub fn run_action(
     app: AppHandle,
@@ -414,10 +446,33 @@ pub fn run_action(
     if !OPS.contains(&op.as_str()) {
         return Err(format!("Unknown action: {op}"));
     }
+    let names = if op == "update-all" { vec![UPDATE_ALL_LABEL.to_string()] } else { names };
     if names.is_empty() {
         return Err("Nothing selected".to_string());
     }
     let script = staged_script(&app, &crate::script_path(&app)?)?;
+    spawn_run(&app, &state, move |app| {
+        run_queue(app, &names, &|name| {
+            let mut cmd = crate::script_command(app, &script);
+            if dry_run {
+                cmd.arg("--dry-run");
+            }
+            cmd.args(["--no-color", &format!("--{op}")]);
+            if op != "update-all" {
+                cmd.arg(name);
+            }
+            cmd
+        });
+    })
+}
+
+/// Marks a run as started and does `work` on a thread; fails when another run
+/// is going. `work` must end the run in the UI with `run-done`.
+pub(crate) fn spawn_run(
+    app: &AppHandle,
+    state: &State<'_, RunState>,
+    work: impl FnOnce(&AppHandle) + Send + 'static,
+) -> Result<(), String> {
     {
         let mut inner = state.inner.lock().unwrap();
         if inner.running {
@@ -425,8 +480,9 @@ pub fn run_action(
         }
         *inner = Inner { running: true, ..Inner::default() };
     }
+    let app = app.clone();
     std::thread::spawn(move || {
-        run_queue(&app, &script, &op, &names, dry_run);
+        work(&app);
         app.state::<RunState>().inner.lock().unwrap().running = false;
     });
     Ok(())
