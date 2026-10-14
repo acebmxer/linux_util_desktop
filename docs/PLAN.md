@@ -66,11 +66,11 @@ Goal: an empty Linux_Util Desktop window that builds and launches.
 
 ### Stage 2: Read-only list
 Goal: see every utility and its install status. Nothing can change the system.
-- [x] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now): v1.8.0
+- [x] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now): v1.9.0
 - [x] Rust command runs `--list --json --no-color`, strips the `Detected:` line
 - [x] UI list with installed badge and version
 - [x] Search box
-- [x] Categories (JSON fields exist on linux_util `dev`, unreleased; v1.8.0 has none, so the UI shows a flat list until a tag with them is vendored)
+- [x] Categories (JSON fields ship in linux_util v1.9.0, now vendored)
 - [x] Detected distro shown in the header (read from `/etc/os-release`; v1.8.0 prints no `Detected:` line)
 - [x] Light and dark theme following the system
 
