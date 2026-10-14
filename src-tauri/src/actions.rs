@@ -7,12 +7,12 @@
 //! app shows its own dialog. The password is checked once, kept in memory for
 //! the length of one run and never written to disk.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -20,9 +20,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const OPS: [&str; 4] = ["install", "uninstall", "update", "update-all"];
-/// The one queue entry an `update-all` run shows.
-const UPDATE_ALL_LABEL: &str = "All installed utilities";
+const OPS: [&str; 3] = ["install", "uninstall", "update"];
 const SOCKET_ENV: &str = "LU_ASKPASS_SOCK";
 
 #[derive(Default)]
@@ -37,12 +35,19 @@ struct Inner {
     pid: Option<u32>,
     /// Set while the password dialog is open; `None` means the user cancelled.
     reply: Option<mpsc::Sender<Option<String>>>,
+    /// The running script's stdin, for answers typed into the run panel.
+    stdin: Option<ChildStdin>,
+    /// Output received after the last newline, per stream; see `pump`.
+    pending: Vec<Arc<Mutex<Vec<u8>>>>,
 }
 
 #[derive(Serialize, Clone)]
 struct Output<'a> {
     text: &'a str,
     stderr: bool,
+    /// The line so far, still waiting for its newline (e.g. a `[y/N]` prompt).
+    /// The next event on the same stream replaces it.
+    partial: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -93,6 +98,60 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// The `sudo` the script runs. Restarting or stopping xrdp ends every open RDP
+/// session, and this app (and the run) may be inside one, so while someone is
+/// connected that one command is skipped with a notice. Everything else goes
+/// to the real sudo unchanged.
+const SUDO_SHIM: &str = r#"#!/bin/sh
+if [ "$1" = systemctl ]; then
+    case "$2" in
+        restart|stop|try-restart|reload-or-restart|try-reload-or-restart)
+            for unit in "$@"; do
+                case "$unit" in
+                    xrdp|xrdp.service|xrdp-sesman|xrdp-sesman.service)
+                        if grep -lqx xrdp-sesexec /proc/[0-9]*/comm 2>/dev/null; then
+                            echo "[WARN] Skipped 'systemctl $2 $unit': RDP sessions are open and would be ended. Restart it later, after logging out." >&2
+                            exit 0
+                        fi
+                        ;;
+                esac
+            done
+            ;;
+    esac
+fi
+# sudo drops BASH_ENV, so a script run as `sudo bash <script>` (the guest tools
+# ISO's installer) would lose the prompt-showing `read`; load it inside root's bash.
+if [ "$1" = bash ]; then
+    shift
+    exec {REAL_SUDO} -A bash -c '. {PRELUDE}; export -f read; exec bash "$@"' bash "$@"
+fi
+exec {REAL_SUDO} -A "$@"
+"#;
+
+/// Sourced by every bash the script starts (`BASH_ENV`). Bash prints the prompt
+/// of `read -p` only when stdin is a terminal, and here it is a pipe, so a
+/// prompt such as "Retry? [y/N]" never showed and the run seemed stuck. This
+/// prints it to stderr instead. Handles `-p` as its own option or last in a
+/// cluster (`-rp`), which is how linux_util writes them.
+const READ_PRELUDE: &str = r#"read() {
+    if [ -p /dev/stdin ]; then
+        local __rp_args=() __rp_prompt="" __rp_have=0 __rp_a
+        while [ $# -gt 0 ]; do
+            __rp_a=$1; shift
+            case "$__rp_a" in
+                -p) __rp_prompt=$1; __rp_have=1; shift ;;
+                -[!-]*p) __rp_prompt=$1; __rp_have=1; shift; [ "${__rp_a%p}" != "-" ] && __rp_args+=("${__rp_a%p}") ;;
+                *) __rp_args+=("$__rp_a") ;;
+            esac
+        done
+        [ "$__rp_have" = 1 ] && printf '%s' "$__rp_prompt" >&2
+        builtin read "${__rp_args[@]}"
+        return
+    fi
+    builtin read "$@"
+}
+"#;
+
 /// Per-run scratch directory (mode 0700) holding the shim, askpass and socket.
 struct Workdir {
     root: PathBuf,
@@ -124,7 +183,9 @@ impl Workdir {
         };
         write_exec(
             work.bin_dir().join("sudo"),
-            format!("#!/bin/sh\nexec {} -A \"$@\"\n", shell_quote(&real_sudo.to_string_lossy())),
+            SUDO_SHIM
+                .replace("{REAL_SUDO}", &shell_quote(&real_sudo.to_string_lossy()))
+                .replace("{PRELUDE}", &shell_quote(&work.prelude_path().to_string_lossy())),
         )?;
         // linux_util.sh runs with the AppImage's library path removed (see
         // `use_host_env`), but this executable still needs the bundled libraries.
@@ -138,7 +199,12 @@ impl Workdir {
             work.askpass_path(),
             format!("#!/bin/sh\n{libs}exec {} --askpass \"$@\"\n", shell_quote(&exe.to_string_lossy())),
         )?;
+        std::fs::write(work.prelude_path(), READ_PRELUDE)
+            .map_err(|e| format!("Could not write {}: {e}", work.prelude_path().display()))?;
         Ok(work)
+    }
+    fn prelude_path(&self) -> PathBuf {
+        self.root.join("prelude.sh")
     }
     fn bin_dir(&self) -> PathBuf {
         self.root.join("bin")
@@ -258,7 +324,13 @@ pub(crate) fn staged_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
     let src = bundled.parent().ok_or("Bundled linux_util.sh has no parent directory")?;
     let dest = staged_dir(app)?;
-    let version = std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default();
+    // The size of the script is part of the stamp so an edited bundled script
+    // is re-staged even when the version number has not moved.
+    let size = std::fs::metadata(src.join("linux_util.sh")).map(|m| m.len()).unwrap_or(0);
+    let version = format!(
+        "{} {size}",
+        std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default().trim()
+    );
     let marker = dest.join(".staged-version");
     let current = std::fs::read_to_string(&marker).ok();
     if current.as_deref() != Some(version.trim()) || !dest.join("linux_util.sh").is_file() {
@@ -304,26 +376,48 @@ pub(crate) fn clean_line(raw: &[u8]) -> String {
     out
 }
 
-fn pump<R: Read + Send + 'static>(app: AppHandle, reader: R, stderr: bool) -> std::thread::JoinHandle<()> {
+/// Sends `reader`'s output to the UI a line at a time. Text left after the
+/// last newline is also sent, as a partial line, so a prompt that waits for an
+/// answer without ending its line is visible before the answer is typed.
+fn pump<R: Read + Send + 'static>(
+    app: AppHandle,
+    mut reader: R,
+    stderr: bool,
+    pending: Arc<Mutex<Vec<u8>>>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let line = clean_line(&buf);
-                    let _ = app.emit("run-output", Output { text: &line, stderr });
-                }
+            let n = match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            let mut pending = pending.lock().unwrap();
+            pending.extend_from_slice(&chunk[..n]);
+            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                let text = clean_line(&line);
+                let _ = app.emit("run-output", Output { text: &text, stderr, partial: false });
             }
+            if !pending.is_empty() {
+                let text = clean_line(&pending);
+                let _ = app.emit("run-output", Output { text: &text, stderr, partial: true });
+            }
+        }
+        let mut pending = pending.lock().unwrap();
+        if !pending.is_empty() {
+            let text = clean_line(&pending);
+            pending.clear();
+            let _ = app.emit("run-output", Output { text: &text, stderr, partial: false });
         }
     })
 }
 
 /// Tells the UI a line of output. `stderr` lines show in the error colour.
 pub(crate) fn emit_output(app: &AppHandle, text: &str, stderr: bool) {
-    let _ = app.emit("run-output", Output { text, stderr });
+    let _ = app.emit("run-output", Output { text, stderr, partial: false });
 }
 
 /// Tells the UI the state of queue entry `index`.
@@ -383,7 +477,8 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
-            .stdin(Stdio::null())
+            .env("BASH_ENV", work.prelude_path())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -391,18 +486,30 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
-                let _ = app.emit("run-output", Output { text: &msg, stderr: true });
+                let _ = app.emit("run-output", Output { text: &msg, stderr: true, partial: false });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
                 continue;
             }
         };
-        state.inner.lock().unwrap().pid = Some(child.id());
+        let pending = [Arc::default(), Arc::default()];
+        {
+            let mut inner = state.inner.lock().unwrap();
+            inner.pid = Some(child.id());
+            inner.stdin = child.stdin.take();
+            inner.pending = pending.to_vec();
+        }
+        let [out_pending, err_pending] = pending;
         let readers = [
-            pump(app.clone(), child.stdout.take().unwrap(), false),
-            pump(app.clone(), child.stderr.take().unwrap(), true),
+            pump(app.clone(), child.stdout.take().unwrap(), false, out_pending),
+            pump(app.clone(), child.stderr.take().unwrap(), true, err_pending),
         ];
         let status = child.wait();
+        {
+            let mut inner = state.inner.lock().unwrap();
+            inner.stdin = None; // closing it lets a child left reading stdin see EOF
+            inner.pending.clear();
+        }
         for r in readers {
             let _ = r.join();
         }
@@ -434,7 +541,6 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
 
 /// Starts a queue of `op` runs, one utility at a time. Progress arrives as the
 /// `run-item`, `run-output`, `askpass-request` and `run-done` events.
-/// `update-all` takes no names: it is one `--update-all` run.
 #[tauri::command]
 pub fn run_action(
     app: AppHandle,
@@ -446,7 +552,6 @@ pub fn run_action(
     if !OPS.contains(&op.as_str()) {
         return Err(format!("Unknown action: {op}"));
     }
-    let names = if op == "update-all" { vec![UPDATE_ALL_LABEL.to_string()] } else { names };
     if names.is_empty() {
         return Err("Nothing selected".to_string());
     }
@@ -458,9 +563,7 @@ pub fn run_action(
                 cmd.arg("--dry-run");
             }
             cmd.args(["--no-color", &format!("--{op}")]);
-            if op != "update-all" {
-                cmd.arg(name);
-            }
+            cmd.arg(name);
             cmd
         });
     })
@@ -494,6 +597,50 @@ pub fn askpass_reply(state: State<'_, RunState>, password: Option<String>) {
     if let Some(tx) = state.inner.lock().unwrap().reply.take() {
         let _ = tx.send(password);
     }
+}
+
+/// True when the system has flagged a pending reboot: the same two checks
+/// linux_util's menu uses before it offers one (the Debian marker file, and
+/// `needs-restarting -r` on Fedora/RHEL).
+#[tauri::command]
+pub fn reboot_needed() -> bool {
+    if Path::new("/var/run/reboot-required").exists() {
+        return true;
+    }
+    let mut cmd = Command::new("needs-restarting");
+    crate::use_host_env(&mut cmd);
+    cmd.arg("-r").stdout(Stdio::null()).stderr(Stdio::null());
+    matches!(cmd.status(), Ok(s) if !s.success())
+}
+
+/// Reboots the machine. Runs as the signed-in user; logind allows that for the
+/// active local session without a password.
+#[tauri::command]
+pub fn reboot_now() -> Result<(), String> {
+    let mut cmd = Command::new("systemctl");
+    crate::use_host_env(&mut cmd);
+    let out = cmd.arg("reboot").output().map_err(|e| format!("Could not run systemctl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Sends one line typed in the run panel to the running script's stdin. The
+/// partial line it answers is taken as ended, so the script's next output
+/// starts a new line, as it would after Enter in a terminal.
+#[tauri::command]
+pub fn send_input(state: State<'_, RunState>, text: String) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    let stdin = inner.stdin.as_mut().ok_or("Nothing is running")?;
+    writeln!(stdin, "{text}")
+        .and_then(|_| stdin.flush())
+        .map_err(|e| format!("Could not send the answer: {e}"))?;
+    for pending in &inner.pending {
+        pending.lock().unwrap().clear();
+    }
+    Ok(())
 }
 
 /// Stops the queue and terminates the running script (SIGTERM, then SIGKILL after 5 s).

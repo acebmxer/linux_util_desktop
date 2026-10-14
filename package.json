@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.mjs",
     "contract": "node scripts/contract_test.mjs"
   },
   "devDependencies": {

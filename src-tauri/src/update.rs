@@ -8,7 +8,7 @@
 //! click, and no checksum means no install.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -200,14 +200,24 @@ fn sha256_of(path: &Path) -> std::io::Result<String> {
 }
 
 /// Downloads `url` to `dest`, reporting progress in tenths when the size is known.
+/// `dest` must not exist yet: it is created exclusively, so a file or link put
+/// there beforehand is never written through. Stops when the run is cancelled.
 fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
     let mut response = agent(true).get(url).call().map_err(|e| format!("Download failed: {e}"))?;
     let total = response.body().content_length();
     let mut reader = response.body_mut().with_config().limit(MAX_DOWNLOAD).reader();
-    let mut file = std::fs::File::create(dest).map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dest)
+        .map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
     let (mut done, mut reported) = (0u64, 0u64);
     let mut buf = [0u8; 64 * 1024];
     loop {
+        if actions::is_cancelled(app) {
+            return Err("Cancelled".to_string());
+        }
         let n = reader.read(&mut buf).map_err(|e| format!("Download failed: {e}"))?;
         if n == 0 {
             break;
@@ -238,7 +248,10 @@ fn fetch_verified(app: &AppHandle, plan: &Plan, dest_dir: &Path, file_name: &str
     let expected = expected_hash(&sums, name).ok_or_else(|| format!("{SUMS_NAME} does not list {name}."))?;
     actions::emit_output(app, &format!("Downloading {name}"), false);
     let dest = dest_dir.join(file_name);
-    download(app, url, &dest)?;
+    if let Err(e) = download(app, url, &dest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(e);
+    }
     actions::emit_output(app, "Checking the download against the checksum", false);
     let actual = sha256_of(&dest).map_err(|e| format!("Could not read {}: {e}", dest.display()))?;
     if actual != expected {
@@ -265,6 +278,25 @@ impl Scratch {
             .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
         Ok(Scratch(dir))
     }
+
+    /// A new private folder inside `base`. Created exclusively under a fresh
+    /// name, so nothing another user put in `base` can be reused or followed.
+    fn new_in(base: &Path) -> Result<Self, String> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let mut last = None;
+        for n in 0..16 {
+            let dir = base.join(format!(".linux-util-desktop-update-{}-{stamp}-{n}", std::process::id()));
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(Scratch(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(format!("Could not create {}: {e}", dir.display())),
+            }
+        }
+        Err(format!("Could not create a folder in {}: {}", base.display(), last.map(|e| e.to_string()).unwrap_or_default()))
+    }
 }
 
 impl Drop for Scratch {
@@ -273,20 +305,21 @@ impl Drop for Scratch {
     }
 }
 
-/// Puts the verified AppImage over the running one. A rename within one folder
-/// is atomic, and the running copy keeps working until the app is restarted.
+/// Puts the verified AppImage over the running one. The download goes to a
+/// private folder next to it (same filesystem, so the rename is atomic) and the
+/// running copy keeps working until the app is restarted.
 fn replace_appimage(plan: &Plan, target: &Path, app: &AppHandle) -> Result<(), String> {
     let dir = target.parent().ok_or("The AppImage has no folder")?;
-    let staged = fetch_verified(app, plan, dir, &format!(".{}.update", plan.file.0))?;
-    let result = std::fs::metadata(target)
+    let scratch = Scratch::new_in(dir)?;
+    let staged = fetch_verified(app, plan, &scratch.0, &plan.file.0)?;
+    if actions::is_cancelled(app) {
+        return Err("Cancelled".to_string());
+    }
+    std::fs::metadata(target)
         .map(|m| m.permissions().mode() & 0o777 | 0o755)
         .and_then(|mode| std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode)))
         .and_then(|_| std::fs::rename(&staged, target))
-        .map_err(|e| format!("Could not replace {}: {e}", target.display()));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
-    result
+        .map_err(|e| format!("Could not replace {}: {e}", target.display()))
 }
 
 fn package_command(method: &Method, file: &Path) -> Command {
@@ -307,38 +340,53 @@ fn package_command(method: &Method, file: &Path) -> Command {
     cmd
 }
 
-fn run_update(app: &AppHandle, plan: &Plan, version: &str) {
+fn run_update(app: &AppHandle, version: &str) {
     let label = format!("Linux_Util Desktop {version}");
     let names = [label.clone()];
+    // A step that fails because Cancel was pressed ends the run as cancelled.
     let fail = |message: String| {
+        if actions::is_cancelled(app) {
+            actions::emit_item(app, 0, &label, "cancelled", None);
+            return actions::emit_done(app, 0, 0, true);
+        }
         actions::emit_output(app, &message, true);
         actions::emit_item(app, 0, &label, "failed", None);
         actions::emit_done(app, 0, 1, false);
     };
-    match &plan.method {
-        Method::AppImage(target) => {
-            actions::emit_item(app, 0, &label, "running", None);
-            match replace_appimage(plan, target, app) {
-                Ok(()) => {
-                    actions::emit_output(app, &format!("Replaced {}", target.display()), false);
-                    actions::emit_item(app, 0, &label, "ok", None);
-                    actions::emit_done(app, 1, 0, false);
-                }
-                Err(e) => fail(e),
-            }
+    actions::emit_item(app, 0, &label, "running", None);
+    actions::emit_output(app, "Checking the latest release", false);
+    let plan = match fetch_release().and_then(|release| {
+        if release.version != version {
+            return Err(format!("Version {} is now the latest, not {version}. Check for updates again.", release.version));
         }
+        plan(&release)
+    }) {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+    if actions::is_cancelled(app) {
+        return fail("Cancelled".to_string());
+    }
+    match &plan.method {
+        Method::AppImage(target) => match replace_appimage(&plan, target, app) {
+            Ok(()) => {
+                actions::emit_output(app, &format!("Replaced {}", target.display()), false);
+                actions::emit_item(app, 0, &label, "ok", None);
+                actions::emit_done(app, 1, 0, false);
+            }
+            Err(e) => fail(e),
+        },
         method => {
             let scratch = match Scratch::create(app) {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
-            let file = match fetch_verified(app, plan, &scratch.0, &plan.file.0) {
+            let file = match fetch_verified(app, &plan, &scratch.0, &plan.file.0) {
                 Ok(f) => f,
                 Err(e) => return fail(e),
             };
             if actions::is_cancelled(app) {
-                actions::emit_item(app, 0, &label, "cancelled", None);
-                return actions::emit_done(app, 0, 0, true);
+                return fail("Cancelled".to_string());
             }
             actions::run_queue(app, &names, &|_| package_command(method, &file));
         }
@@ -375,20 +423,12 @@ pub async fn check_update(app: AppHandle) -> Result<Option<Update>, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Installs release `version`, as a run in the action panel. Refuses when the
-/// latest release is no longer the one the user was shown.
+/// Installs release `version`, as a run in the action panel. The run starts
+/// at once, so Cancel works from the first moment; it fails when the latest
+/// release is no longer the one the user was shown.
 #[tauri::command]
-pub async fn install_update(app: AppHandle, state: State<'_, RunState>, version: String) -> Result<(), String> {
-    let plan_and_version = tauri::async_runtime::spawn_blocking(move || {
-        let release = fetch_release()?;
-        if release.version != version {
-            return Err(format!("Version {} is now the latest, not {version}. Check for updates again.", release.version));
-        }
-        plan(&release).map(|p| (p, release.version))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    actions::spawn_run(&app, &state, move |app| run_update(app, &plan_and_version.0, &plan_and_version.1))
+pub fn install_update(app: AppHandle, state: State<'_, RunState>, version: String) -> Result<(), String> {
+    actions::spawn_run(&app, &state, move |app| run_update(app, &version))
 }
 
 #[cfg(test)]

@@ -25,6 +25,9 @@ jobs:
         # Pinned to a commit SHA: a tag can be retargeted, a SHA cannot.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Always main: a manual run can be started from another branch, and
+          # that branch must never be taken for main.
+          ref: main
           fetch-depth: 0
 
       - name: Fast-forward dev

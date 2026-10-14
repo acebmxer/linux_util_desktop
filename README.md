@@ -37,7 +37,7 @@ non-interactive flags:
 | Show utilities and install status | `linux_util.sh --list --json` |
 | Install (Apply for system tasks) | `linux_util.sh --install <name>` |
 | Uninstall (Revert for system tasks) | `linux_util.sh --uninstall <name>` |
-| Update selected / Update all | `linux_util.sh --update <name>` / `--update-all` |
+| Update selected | `linux_util.sh --update <name>` |
 | Preview without changing anything | adds `--dry-run` |
 | Profiles built into linux_util | `linux_util.sh --export-profile` |
 | Logs | reads the `logs/` folder linux_util writes |
@@ -53,6 +53,10 @@ options that affect the app's runs: answering yes to installer questions
 (without a terminal they are answered no), verbose and debug output, and how
 long logs are kept. They are saved in the app's config folder
 (`~/.config/io.github.acebmxer.linux-util-desktop/`).
+
+While a run is going, a box under its output sends a typed answer to the run,
+for questions the package manager itself asks, such as dnf's `Is this ok
+[y/N]` or apt's `Do you want to continue? [Y/n]` during **System Updates**.
 
 The window's bottom line shows the app version and the bundled linux_util
 version. On launch the app looks at this project's latest GitHub release and, if

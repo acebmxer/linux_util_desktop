@@ -16,7 +16,36 @@ permissions:
   contents: read
 
 jobs:
+  # The path filter fires on any edit to tauri.conf.json. A push only releases
+  # when the version itself changed; a manual run always goes ahead.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: check
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          now=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          changed=true
+          if [[ "$GITHUB_EVENT_NAME" == "push" && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            before=$(git show "$BEFORE:src-tauri/tauri.conf.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+            if [[ "$before" == "$now" ]]; then
+              echo "Version is still $now; tauri.conf.json changed for another reason. Not releasing."
+              changed=false
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -99,12 +128,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Checkout first: on an empty workspace it clears the folder, which would
+      # delete files downloaded before it.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release
           path: release
-
-      - uses: actions/checkout@v4
 
       - name: Create or refresh the draft release
         env:
@@ -117,6 +148,8 @@ jobs:
               echo "::error::$tag is already published; not touching it"
               exit 1
             fi
+            # The files are rebuilt from this commit, so the tag must point here too.
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
             gh release upload "$tag" release/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" release/* \

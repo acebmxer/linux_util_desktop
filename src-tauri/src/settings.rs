@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager};
 const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 /// The linux_util config keys the app offers: only those its `--install`,
-/// `--uninstall`, `--update` and `--update-all` runs actually read. The rest
+/// `--uninstall` and `--update` runs actually read. The rest
 /// (retries, pre-flight checks) belong to the terminal menu.
 const KEYS: [(&str, Kind); 5] = [
     ("auto_confirm", Kind::Bool),

@@ -8,6 +8,7 @@ interface Utility {
   version: string | null;
   category?: string | null;
   subcategory?: string | null;
+  description?: string | null;
 }
 
 const SCHEMA = "linux_util/list/v1";
@@ -67,7 +68,7 @@ function subOf(u: Utility): string {
 function matchesQuery(u: Utility): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [u.name, u.category, u.subcategory].some((s) => s?.toLowerCase().includes(q));
+  return [u.name, u.category, u.subcategory, u.description].some((s) => s?.toLowerCase().includes(q));
 }
 
 function matches(u: Utility): boolean {
@@ -98,6 +99,7 @@ function renderCategories() {
     button.setAttribute("aria-current", String(current));
     const text = document.createElement("span");
     text.textContent = label;
+    text.title = label;
     const n = document.createElement("span");
     n.className = "muted";
     n.textContent = String(count);
@@ -146,6 +148,7 @@ function row(u: Utility, showSub: boolean): HTMLLIElement {
   box.tabIndex = u.name === cursor ? 0 : -1;
   box.addEventListener("focus", () => {
     cursor = u.name;
+    showDescription(u.name);
     for (const other of listBoxes()) other.tabIndex = other === box ? 0 : -1;
   });
   box.addEventListener("change", () => {
@@ -159,6 +162,7 @@ function row(u: Utility, showSub: boolean): HTMLLIElement {
   name.className = "name";
   name.textContent = u.name;
   li.append(box, name);
+  li.addEventListener("mouseenter", () => showDescription(u.name));
   if (showSub && u.subcategory) {
     const sub = document.createElement("span");
     sub.className = "sub";
@@ -208,7 +212,15 @@ function renderList() {
     cursor = current.dataset.name ?? null;
     if (hadFocus) current.focus();
   }
+  showDescription(cursor);
   $("status").textContent = shown.length === 0 ? "No utilities match." : "";
+}
+
+// The panel under the list shows the description of the highlighted utility,
+// as linux_util's menu does.
+function showDescription(name: string | null) {
+  const u = utilities.find((x) => x.name === name);
+  $("description").textContent = u?.description ?? "";
 }
 
 function listBoxes(): HTMLInputElement[] {
@@ -242,7 +254,6 @@ function renderActionBar() {
   $<HTMLButtonElement>("clearsel").disabled = running;
   $<HTMLButtonElement>("openprofiles").disabled = running || !loaded;
   $<HTMLButtonElement>("opensettings").disabled = running;
-  $<HTMLButtonElement>("do-updateall").disabled = running || !utilities.some((u) => u.installed);
 }
 
 // ---- running actions ----
@@ -250,20 +261,42 @@ function renderActionBar() {
 const logEl = () => $<HTMLPreElement>("log");
 let logText = "";
 
-function appendLog(text: string, stderr = false) {
-  logText += text + "\n";
-  const line = document.createElement("div");
-  if (stderr) line.className = "err";
-  line.textContent = text;
+// A line still waiting for its newline, per stream (e.g. a "[y/N]" prompt).
+// The next output on that stream replaces its text.
+const partialLines = new Map<boolean, HTMLDivElement>();
+
+function appendLog(text: string, stderr = false, partial = false) {
   const pre = logEl();
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
-  pre.append(line);
+  let line = partialLines.get(stderr);
+  if (!line) {
+    line = document.createElement("div");
+    if (stderr) line.className = "err";
+    pre.append(line);
+  }
+  line.textContent = text;
+  if (partial) partialLines.set(stderr, line);
+  else {
+    partialLines.delete(stderr);
+    logText += text + "\n";
+  }
   if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+// Shows a typed answer the way a terminal echoes it: after the prompt it answers.
+function echoAnswer(text: string) {
+  const prompt = partialLines.get(false) ?? partialLines.get(true);
+  partialLines.clear();
+  if (prompt) {
+    prompt.textContent += text;
+    logText += prompt.textContent + "\n";
+  } else appendLog(text);
 }
 
 function setRunning(value: boolean) {
   running = value;
   $<HTMLButtonElement>("cancel").hidden = !value;
+  $<HTMLFormElement>("answer").hidden = !value;
   $<HTMLButtonElement>("closerun").hidden = value;
   $<HTMLButtonElement>("copylog").hidden = false;
   render();
@@ -272,16 +305,33 @@ function setRunning(value: boolean) {
 async function start(op: Op) {
   const names = pickedWhere(op === "install" ? false : true);
   if (!names.length || running) return;
+  if (op === "uninstall" && !$<HTMLInputElement>("dryrun").checked) {
+    confirmRemove(names);
+    return;
+  }
   await launch(op, names, opLabel(op, names));
 }
 
-// One `linux_util.sh --update-all` run: it decides itself what is installed.
-async function startUpdateAll() {
-  if (running) return;
-  await launch("update-all", ["All installed utilities"], "Update all");
+// Uninstalling can delete a program's data, so a real (not dry) run asks first.
+let removeNames: string[] = [];
+
+function confirmRemove(names: string[]) {
+  removeNames = names;
+  const label = opLabel("uninstall", names);
+  $("removetitle").textContent = `${label} ${names.length === 1 ? names[0] : `${names.length} utilities`}?`;
+  $("removelist").replaceChildren(
+    ...names.map((n) => {
+      const li = document.createElement("li");
+      li.textContent = n;
+      return li;
+    }),
+  );
+  $("removeok").textContent = label;
+  $<HTMLDialogElement>("confirmremove").showModal();
+  $("removecancel").focus();
 }
 
-async function launch(op: Op | "update-all", names: string[], title: string) {
+async function launch(op: Op, names: string[], title: string) {
   const dryRun = $<HTMLInputElement>("dryrun").checked;
   await openRun(`${title}${dryRun ? " (dry run)" : ""}`, names, () => invoke("run_action", { op, names, dryRun }));
 }
@@ -289,6 +339,7 @@ async function launch(op: Op | "update-all", names: string[], title: string) {
 // Shows the run panel with one queue entry per name, then starts the run.
 async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
   logText = "";
+  partialLines.clear();
   logEl().replaceChildren();
   $("runtitle").textContent = title;
   $("runsummary").textContent = "";
@@ -328,13 +379,29 @@ function setAskBusy(busy: boolean) {
 for (const op of ["install", "update", "uninstall"] as Op[]) {
   $(`do-${op}`).addEventListener("click", () => start(op));
 }
-$("do-updateall").addEventListener("click", startUpdateAll);
+$("removecancel").addEventListener("click", () => $<HTMLDialogElement>("confirmremove").close());
+$("removeok").addEventListener("click", () => {
+  $<HTMLDialogElement>("confirmremove").close();
+  if (removeNames.length && !running) launch("uninstall", removeNames, opLabel("uninstall", removeNames));
+});
 $("clearsel").addEventListener("click", () => {
   picked.clear();
   $("selnote").textContent = "";
   render();
 });
 $("cancel").addEventListener("click", () => invoke("cancel_run"));
+$<HTMLFormElement>("answer").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const input = $<HTMLInputElement>("answertext");
+  const text = input.value;
+  input.value = "";
+  try {
+    await invoke("send_input", { text });
+    echoAnswer(text);
+  } catch (e) {
+    appendLog(String(e), true);
+  }
+});
 $("closerun").addEventListener("click", () => ($("runpanel").hidden = true));
 $("copylog").addEventListener("click", async () => {
   const button = $("copylog");
@@ -359,7 +426,9 @@ $<HTMLDialogElement>("askpass").addEventListener("cancel", (ev) => {
   stopAsking(null);
 });
 
-listen<{ text: string; stderr: boolean }>("run-output", (ev) => appendLog(ev.payload.text));
+listen<{ text: string; stderr: boolean; partial: boolean }>("run-output", (ev) =>
+  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial),
+);
 listen<{ index: number; name: string; state: string; code: number | null }>("run-item", (ev) => {
   const { index, name, state, code } = ev.payload;
   const li = $("queue").children[index] as HTMLElement | undefined;
@@ -393,6 +462,31 @@ listen<{ ok: number; failed: number; cancelled: boolean }>("run-done", (ev) => {
   $("selnote").textContent = "";
   setRunning(false);
   load();
+  if (ok > 0 && !cancelled) offerReboot();
+});
+
+// Same offer linux_util's menu makes at the end of a run, when the system says
+// a reboot is pending.
+async function offerReboot() {
+  try {
+    if (!(await invoke<boolean>("reboot_needed"))) return;
+  } catch {
+    return;
+  }
+  $("rebooterr").textContent = "";
+  const dialog = $<HTMLDialogElement>("reboot");
+  if (!dialog.open) dialog.showModal();
+  $("rebootlater").focus();
+}
+
+$("rebootlater").addEventListener("click", () => $<HTMLDialogElement>("reboot").close());
+$("rebootnow").addEventListener("click", async () => {
+  try {
+    await invoke("reboot_now");
+    $<HTMLDialogElement>("reboot").close();
+  } catch (e) {
+    $("rebooterr").textContent = String(e);
+  }
 });
 
 // ---- profiles ----
@@ -857,7 +951,7 @@ document.addEventListener("keydown", (ev) => {
       return;
     case "ArrowLeft":
     case "ArrowRight":
-      if (!inList) return;
+      if (!inList && target !== document.body) return;
       ev.preventDefault();
       moveCategory(ev.key === "ArrowRight" ? 1 : -1);
       return;

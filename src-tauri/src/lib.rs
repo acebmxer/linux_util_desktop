@@ -95,11 +95,70 @@ pub(crate) fn script_command(app: &tauri::AppHandle, script: &std::path::Path) -
     cmd
 }
 
+/// `linux_util.sh --list --json` carries no descriptions, but linux_util keeps
+/// one per utility as `UTILITY_DESCRIPTION["Name"]="text"` in `lib/installers.sh`.
+/// Reads those lines into a name -> text map. Only the escapes bash applies
+/// inside double quotes (`\"`, `\$`, `\\`, `\``) are undone. Delete this once
+/// linux_util puts `description` in the list JSON itself.
+fn read_descriptions(script: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(dir) = script.parent() else { return map };
+    let Ok(text) = std::fs::read_to_string(dir.join("lib").join("installers.sh")) else {
+        return map;
+    };
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("UTILITY_DESCRIPTION[\"") else { continue };
+        let Some((name, rest)) = rest.split_once("\"]=\"") else { continue };
+        let Some(body) = rest.strip_suffix('"') else { continue };
+        let mut out = String::with_capacity(body.len());
+        let mut chars = body.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some(n @ ('"' | '$' | '\\' | '`')) => out.push(n),
+                    Some(n) => {
+                        out.push('\\');
+                        out.push(n);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        map.insert(name.to_string(), out);
+    }
+    map
+}
+
+/// Adds a `description` to each utility in the list JSON. Returns the JSON
+/// unchanged if it can't be parsed, so a list never fails over this.
+fn with_descriptions(json: &str, script: &std::path::Path) -> String {
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let descriptions = read_descriptions(script);
+    if let Some(items) = doc.get_mut("utilities").and_then(|u| u.as_array_mut()) {
+        for item in items {
+            let found = item
+                .get("name")
+                .and_then(|n| n.as_str())
+                .and_then(|n| descriptions.get(n))
+                .cloned();
+            if let (Some(text), Some(obj)) = (found, item.as_object_mut()) {
+                obj.insert("description".into(), text.into());
+            }
+        }
+    }
+    doc.to_string()
+}
+
 /// Runs `linux_util.sh --list --json --no-color` and returns the JSON document.
 /// Anything printed before the first `{` (such as a `Detected:` line) is dropped.
 #[tauri::command]
 async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
-    let mut cmd = script_command(&app, &script_path(&app)?);
+    let script = script_path(&app)?;
+    let mut cmd = script_command(&app, &script);
     tauri::async_runtime::spawn_blocking(move || {
         let output = cmd
             .args(["--list", "--json", "--no-color"])
@@ -115,7 +174,7 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
             ));
         }
         match stdout.find('{') {
-            Some(start) => Ok(stdout[start..].to_string()),
+            Some(start) => Ok(with_descriptions(&stdout[start..], &script)),
             None => Err("linux_util.sh --list produced no JSON".to_string()),
         }
     })
@@ -157,6 +216,9 @@ pub fn run() {
             actions::run_action,
             actions::askpass_reply,
             actions::cancel_run,
+            actions::send_input,
+            actions::reboot_needed,
+            actions::reboot_now,
             profiles::list_profiles,
             profiles::import_profile,
             profiles::export_profile,

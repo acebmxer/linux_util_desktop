@@ -11,6 +11,48 @@ release is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **Description panel**: a panel under the list shows linux_util's description
+  of the highlighted utility (by keyboard or mouse), as its menu does, and
+  search matches descriptions too. linux_util's `--list --json` does not
+  include descriptions, so they are read from the bundled `lib/installers.sh`.
+- **Reboot prompt**: when a run finishes and the system has flagged a pending
+  reboot, a "Reboot needed" dialog offers **Reboot now** or **Later**, as
+  linux_util's own menu does.
+
+### Removed
+
+- **Update all** button. linux_util's menu has no such function, and the
+  command it ran reinstalled applications (Node.js, Termius, Angry IP Scanner)
+  instead of updating them. Update still works on the selected utilities.
+
+### Fixed
+
+- **Updating Enable RDP no longer drops your RDP session**: the update restarts
+  xrdp, which ended every open session along with the app and the run inside
+  it. While an RDP session is open, a run now skips that restart and says so;
+  restart xrdp yourself after logging out.
+- **Prompts that never appeared**: a question the script asks, such as "Would
+  you like to retry mounting? [y/N]", is now shown in the run panel; before,
+  the run waited on it without any sign of why.
+- **App update**: Cancel now stops an update at any point, including while
+  the release is being checked and while an AppImage downloads; before, an
+  AppImage update went ahead and reported success after Cancel. The AppImage
+  download goes to a new private folder next to it instead of a fixed file name.
+- **Uninstall asks first**: Uninstall (and Revert) lists what will be removed
+  and warns that some uninstallers also delete the program's data, such as
+  Thunderbird profiles, Bottles prefixes or Podman containers. Dry runs do not ask.
+- **Error output** in the run log is shown in the error colour again.
+- **Left and right arrows** switch category again after a search leaves a
+  category empty.
+- **Answering package-manager prompts**: tasks that leave the package
+  manager's own confirmation to the user, such as **System Updates** and
+  **Full System Upgrade**, failed at once with "Operation aborted by the user"
+  because the run had no input. The run panel now has an answer box: a prompt
+  shows in the output while it waits, and the typed answer (for example `y`)
+  goes to the run, as in a terminal.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
