@@ -142,10 +142,10 @@ uses the desktop's own GTK, fonts and graphics libraries. Flatpak is
 intentionally skipped because its sandbox would block the admin rights that
 installs need.
 
-Pushing a `v*` tag runs the Release workflow: it builds all three on Ubuntu
-22.04, checks the tag matches the version in `src-tauri/tauri.conf.json`,
-installs each in clean containers and attaches them to the tag's GitHub
-release (created as a draft if it does not exist yet).
+When the version in `src-tauri/tauri.conf.json` changes on `main`, the Release
+workflow builds all three on Ubuntu 22.04, installs each in clean containers
+and attaches them to a **draft** GitHub release for that version. Publishing
+the draft creates the tag, so the files are already there.
 
 To build and smoke-test locally (needs podman or docker for the tests):
 

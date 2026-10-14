@@ -1,13 +1,16 @@
 name: Release
 
-# On a version tag: builds the AppImage, .deb and .rpm, installs each in clean
-# Ubuntu, Fedora, openSUSE and Arch containers (scripts/smoke_test.sh), then
-# attaches them with SHA256SUMS to the tag's GitHub release. If that release
-# does not exist yet it is created as a draft, and publishing it is left to a
-# person. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than that.
+# When the app version changes on main (or on demand): builds the AppImage,
+# .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and Arch
+# containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS to a
+# DRAFT release for that version. Publishing the draft creates the tag, so the
+# files are already there when it goes public. Builds on Ubuntu 22.04 so the
+# AppImage needs no newer glibc than that.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: ["src-tauri/tauri.conf.json"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,11 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the tag matches the app version
+      - name: Stop if this version is already released
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src-tauri/tauri.conf.json"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json first"
             exit 1
           fi
 
@@ -50,7 +53,7 @@ jobs:
 
       - name: Collect release files
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           bundle=src-tauri/target/release/bundle
           mkdir release
           cp "$bundle/deb/Linux_Util Desktop_${version}_amd64.deb" \
@@ -101,17 +104,23 @@ jobs:
           name: release
           path: release
 
-      - name: Attach files to the release
+      - uses: actions/checkout@v4
+
+      - name: Create or refresh the draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The release may already exist (published by hand while this ran).
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/* \
-              --repo "$GITHUB_REPOSITORY" --clobber
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="v$version"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
+              echo "::error::$tag is already published; not touching it"
+              exit 1
+            fi
+            gh release upload "$tag" release/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release/* \
-              --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-              --title "Linux_Util Desktop $GITHUB_REF_NAME" \
+            gh release create "$tag" release/* \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
+              --title "Linux_Util Desktop $tag" \
               --notes "Checksums for every file are in SHA256SUMS."
           fi
