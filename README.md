@@ -12,8 +12,9 @@ A desktop app for [linux_util](https://github.com/acebmxer/linux_util). Pick
 utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.
 
-> **Status: planning.** Nothing is built yet. See [docs/PLAN.md](docs/PLAN.md)
-> for the staged roadmap and where work currently stands.
+> **Status: early development.** The app opens an empty window; no features yet.
+> See [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work
+> currently stands.
 
 ## What it is (and isn't)
 
@@ -52,6 +53,23 @@ change is needed.
 interface with the system's built-in web renderer (WebKitGTK on Linux). It is
 not a browser tab and runs no local web server. A small Rust shell starts
 `linux_util.sh` and streams its output to the window.
+
+## Development
+
+Needs Node.js 22+, npm, Rust (cargo) and Tauri's system libraries:
+
+| Distro | Install |
+|---|---|
+| Fedora | `sudo dnf install webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel gcc pkgconf-pkg-config` |
+| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev libssl-dev build-essential pkg-config` |
+| Arch | `sudo pacman -S webkit2gtk-4.1 gtk3 libsoup3 librsvg openssl base-devel` |
+
+Then:
+
+```
+npm install
+npm run tauri dev
+```
 
 ## Packaging (planned)
 

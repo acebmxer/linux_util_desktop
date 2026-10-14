@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 0 (groundwork) complete. Next: Stage 1.**
+**Current stage: 1 (skeleton) built. Next: Stage 2.**
 
 ## Decisions made
 
@@ -59,10 +59,10 @@ Fallback if it does not: run the script inside a PTY and answer the prompt.
 
 ### Stage 1: Skeleton
 Goal: an empty Linux_Util Desktop window that builds and launches.
-- [ ] Scaffold Tauri app (TypeScript, no heavy UI framework unless needed)
-- [ ] Window title, app ID, icon placeholder, desktop entry
-- [ ] `npm run tauri dev` works; document prerequisites for Fedora, Debian, Arch
-- [ ] CI: build on push (Ubuntu runner)
+- [x] Scaffold Tauri app (TypeScript, no heavy UI framework unless needed)
+- [x] Window title, app ID, icon placeholder, desktop entry
+- [x] `npm run tauri dev` works; document prerequisites for Fedora, Debian, Arch
+- [x] CI: build on push (Ubuntu runner)
 
 ### Stage 2: Read-only list
 Goal: see every utility and its install status. Nothing can change the system.
@@ -123,5 +123,6 @@ Goal: installable builds on other distros.
 
 ## Prerequisites on the dev machine
 
-Already present: `node`, `npm`, `cargo`, `rustc`. Still to check at Stage 1:
-Tauri's system libraries (WebKitGTK 4.1 dev packages and friends).
+Already present: `node`, `npm`, `cargo`, `rustc`. Tauri's system libraries
+(WebKitGTK 4.1 dev packages) are not installed on the host; Stage 1 was built
+and launched in a Fedora 45 container. Package lists are in the README.
