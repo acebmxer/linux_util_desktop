@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 3 (actions) built. Next: Stage 4.**
+**Current stage: 4 (sync and contract) complete. Next: Stage 5.**
 
 ## Decisions made
 
@@ -95,10 +95,10 @@ not on a real desktop.
 
 ### Stage 4: Sync and contract
 Goal: keep the bundled script current without surprises.
-- [ ] `scripts/sync_linux_util.sh <tag>` copies a tag into `vendor/` and writes `VERSION`
-- [ ] Contract test checks the bundled script against `docs/CONTRACT.md`
-- [ ] Scheduled CI job opens a PR when a new linux_util tag appears
-- [ ] Test in the linux_util repo or here that guards `--list --json` (decide where)
+- [x] `scripts/sync_linux_util.sh <tag>` copies a tag into `vendor/` and writes `VERSION`
+- [x] Contract test checks the bundled script against `docs/CONTRACT.md` (`npm run contract`, also in the Build workflow)
+- [x] Scheduled CI job opens a PR when a new linux_util tag appears (`sync-linux-util.yml`, daily, PR against `dev`; draft if the contract fails)
+- [x] Test that guards `--list --json`: decided here only, covered by the contract test
 
 ### Stage 5: Packaging and release
 Goal: installable builds on other distros.
@@ -124,8 +124,8 @@ Goal: installable builds on other distros.
 1. **Run the sudo shim approach?** Confirm in the Stage 3 spike (above).
 2. **Categories.** Decided: (a). `linux_util` `--list --json` now has `category` and
    `subcategory` on each utility (added to the existing `linux_util/list/v1`
-   schema, since the fields are additive). Not yet released in a linux_util tag.
-3. **Test coverage.** Where should the JSON contract test live?
+   schema, since the fields are additive). Released in linux_util v1.9.0.
+3. **Test coverage.** Decided: the contract test lives in this repo only.
 4. **Pinning policy.** One bundled script version per release, with no runtime
    downloads, as assumed in the README.
 5. **Windows/macOS.** Out of scope; linux_util is Linux-only.

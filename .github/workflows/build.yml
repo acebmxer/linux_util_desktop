@@ -28,5 +28,6 @@ jobs:
             libsoup-3.0-dev librsvg2-dev libssl-dev libayatana-appindicator3-dev
 
       - run: npm install
+      - run: npm run contract
       - run: npm run build
       - run: cargo build --manifest-path src-tauri/Cargo.toml

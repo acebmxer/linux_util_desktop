@@ -60,9 +60,12 @@ Needs Node.js 22+, npm, Rust (cargo) and Tauri's system libraries:
 
 | Distro | Install |
 |---|---|
-| Fedora | `sudo dnf install webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel gcc pkgconf-pkg-config` |
-| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev libssl-dev build-essential pkg-config` |
-| Arch | `sudo pacman -S webkit2gtk-4.1 gtk3 libsoup3 librsvg openssl base-devel` |
+| Fedora | `sudo dnf install rust cargo webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel gcc pkgconf-pkg-config` |
+| Debian / Ubuntu | `sudo apt install curl libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev libssl-dev build-essential pkg-config` |
+| Arch | `sudo pacman -S rust webkit2gtk-4.1 gtk3 libsoup3 librsvg openssl base-devel` |
+
+On Debian/Ubuntu, install Rust with [rustup](https://rustup.rs) instead of
+apt; the packaged `rustc` is often too old for Tauri 2.
 
 Then:
 
@@ -70,6 +73,19 @@ Then:
 npm install
 npm run tauri dev
 ```
+
+### Updating the bundled linux_util
+
+```
+scripts/sync_linux_util.sh v1.9.0
+npm run contract
+```
+
+The sync script replaces `vendor/` with that tag's `linux_util.sh`, `lib/` and
+`LICENSE` and records the tag in `vendor/linux_util.VERSION`. The contract test
+checks the bundled script still does what [docs/CONTRACT.md](docs/CONTRACT.md)
+says the app relies on. A daily workflow does both and opens a PR against `dev`
+when linux_util has a newer tag.
 
 ## Packaging (planned)
 

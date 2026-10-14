@@ -1,8 +1,9 @@
 # CLI contract
 
 What Linux_Util Desktop relies on from `linux_util.sh`. If a linux_util release
-changes any of this, the contract test (Stage 4) fails and the sync PR is
-blocked until the app is updated.
+changes any of this, the contract test (`npm run contract`,
+`scripts/contract_test.mjs`) fails and the sync PR is opened as a draft until
+the app is updated.
 
 ## Flags used
 
@@ -11,7 +12,8 @@ blocked until the app is updated.
 
 ## `--list --json`
 
-Observed against linux_util v1.8.0:
+Observed against linux_util v1.8.0 (shape unchanged in v1.9.0, plus the
+category fields below):
 
 ```json
 {
@@ -24,7 +26,7 @@ Observed against linux_util v1.8.0:
 ```
 
 Relied on: `schema` equals `linux_util/list/v1`; `utilities[]` entries have
-`name` (string), `installed` (bool) and `version` (string or null).
+`name` (non-empty string, unique), `installed` (bool) and `version` (string or null).
 
 Notes:
 - v1.8.0 prints only a blank line before the JSON. The app drops everything
