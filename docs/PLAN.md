@@ -104,7 +104,7 @@ Goal: keep the bundled script current without surprises.
 Goal: installable builds on other distros.
 - [x] AppImage, `.deb`, `.rpm` via Tauri bundler (built on Ubuntu 22.04, the same as the Release workflow)
 - [x] Declare the WebKitGTK dependency in `.deb` and `.rpm`: Tauri adds WebKitGTK and GTK itself (the `.rpm` by soname, so it resolves on openSUSE too); `bash` and `sudo` added
-- [x] Release workflow on tag push, with checksums (`release.yml`: tag must match the app version, draft release; not yet run on GitHub)
+- [x] Release workflow on a version change on `main`, with checksums (`release.yml`: builds, smoke-tests, attaches the files to a draft release; publishing the draft creates the tag, so a published release is never empty)
 - [x] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE (`scripts/smoke_test.sh`, also a job in `release.yml`; run locally with podman, all four pass)
 - [x] First tagged release `v0.1.0` (2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45. The release was published by hand before the workflow finished, so its files were attached afterwards; `release.yml` now uploads to an existing release)
 
