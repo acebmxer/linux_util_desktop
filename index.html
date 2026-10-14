@@ -7,46 +7,127 @@
   <body>
     <div id="app">
       <header>
-        <h1>Linux_Util Desktop</h1>
-        <span id="distro" class="muted"></span>
-        <span id="count" class="muted"></span>
-        <input id="search" type="search" placeholder="Search utilities" autofocus />
+        <div class="info">
+          <h1>Linux_Util Desktop</h1>
+          <span id="distro" class="muted"></span>
+          <span id="count" class="muted" role="status"></span>
+        </div>
+        <div class="tools">
+          <button id="openprofiles" type="button">Profiles</button>
+          <button id="openlogs" type="button">Logs</button>
+          <button id="opensettings" type="button">Settings</button>
+          <input id="search" type="search" placeholder="Search utilities (/)" aria-label="Search utilities" autofocus />
+        </div>
       </header>
       <div id="body">
-        <nav id="categories" hidden></nav>
-        <ul id="list"></ul>
+        <nav id="categories" aria-label="Categories" hidden></nav>
+        <ul id="list" aria-label="Utilities"></ul>
       </div>
-      <section id="runpanel" hidden>
+      <section id="runpanel" aria-label="Run output" hidden>
         <div id="runhead">
           <strong id="runtitle"></strong>
-          <span id="runsummary" class="muted"></span>
+          <span id="runsummary" class="muted" role="status"></span>
           <span class="spacer"></span>
           <button id="cancel" type="button">Cancel</button>
           <button id="copylog" type="button">Copy log</button>
           <button id="closerun" type="button">Close</button>
         </div>
         <ol id="queue"></ol>
-        <pre id="log"></pre>
+        <pre id="log" tabindex="0" aria-label="Output"></pre>
       </section>
-      <div id="actionbar" hidden>
-        <span id="selcount"></span>
+      <div id="actionbar">
+        <span id="selcount" role="status"></span>
         <button id="clearsel" type="button" class="link">Clear</button>
+        <span id="selnote" class="muted"></span>
         <span class="spacer"></span>
         <label><input id="dryrun" type="checkbox" /> Dry run</label>
         <button id="do-install" type="button"></button>
         <button id="do-update" type="button"></button>
         <button id="do-uninstall" type="button"></button>
+        <span class="divider"></span>
+        <button id="do-updateall" type="button">Update all</button>
       </div>
-      <p id="status" class="muted">Loading utilities…</p>
-      <dialog id="askpass">
+      <p id="status" class="muted" role="status">Loading utilities…</p>
+      <dialog id="askpass" aria-labelledby="asktitle">
         <form method="dialog" id="askform">
-          <h2>Administrator password</h2>
+          <h2 id="asktitle">Administrator password</h2>
           <p class="muted">Needed to change system software.</p>
-          <input id="askpw" type="password" autocomplete="off" required />
+          <input id="askpw" type="password" autocomplete="off" aria-label="Password" required />
           <p id="askerr" class="error"></p>
           <div class="buttons">
             <button id="askcancel" type="button">Cancel</button>
             <button id="askok" type="submit" class="primary">Authenticate</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="profiles" aria-labelledby="profilestitle">
+        <h2 id="profilestitle">Profiles</h2>
+        <p class="muted">Choosing a profile selects its utilities. Nothing runs until you click Install or Update.</p>
+        <div id="profilelist"></div>
+        <p id="profileerr" class="error"></p>
+        <form id="exportform" class="row">
+          <input id="profilename" type="text" placeholder="Name for the current selection" aria-label="Profile name" required />
+          <button id="profileexport" type="submit">Export selection…</button>
+        </form>
+        <div class="buttons">
+          <button id="profileimport" type="button">Import from file…</button>
+          <span class="spacer"></span>
+          <button id="profileclose" type="button">Close</button>
+        </div>
+      </dialog>
+      <dialog id="logs" aria-labelledby="logstitle">
+        <h2 id="logstitle">linux_util logs</h2>
+        <div id="logsbody">
+          <ul id="loglist" aria-label="Log files"></ul>
+          <pre id="logview" tabindex="0" aria-label="Log contents"></pre>
+        </div>
+        <p id="logpath" class="muted"></p>
+        <p id="logerr" class="error"></p>
+        <div class="buttons">
+          <button id="logrefresh" type="button">Refresh</button>
+          <span class="spacer"></span>
+          <button id="logcopy" type="button">Copy</button>
+          <button id="logsclose" type="button">Close</button>
+        </div>
+      </dialog>
+      <dialog id="settings" aria-labelledby="settingstitle">
+        <form id="settingsform">
+          <h2 id="settingstitle">Settings</h2>
+          <div id="settingsbody">
+          <fieldset>
+            <legend>Appearance</legend>
+            <label class="field">
+              <span>Theme</span>
+              <select id="theme">
+                <option value="system">Follow the system</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>linux_util</legend>
+            <p class="muted">Used by every install, uninstall and update the app runs.</p>
+            <div id="lufields"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Keyboard</legend>
+            <dl id="keys">
+              <dt>/</dt><dd>Search</dd>
+              <dt>Esc</dt><dd>Clear the search</dd>
+              <dt>↑ ↓, Home, End</dt><dd>Move through the list</dd>
+              <dt>Space</dt><dd>Select or deselect</dd>
+              <dt>← →</dt><dd>Previous or next category</dd>
+              <dt>A / D</dt><dd>Select all shown / deselect all</dd>
+            </dl>
+          </fieldset>
+          </div>
+          <p id="settingserr" class="error"></p>
+          <div class="buttons">
+            <button id="settingsreset" type="button">Reset to defaults</button>
+            <span class="spacer"></span>
+            <button id="settingscancel" type="button">Cancel</button>
+            <button type="submit" class="primary">Save</button>
           </div>
         </form>
       </dialog>

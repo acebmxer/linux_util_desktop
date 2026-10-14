@@ -1,4 +1,7 @@
 mod actions;
+mod logs;
+mod profiles;
+mod settings;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -79,16 +82,25 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "Bundled linux_util.sh not found".to_string())
 }
 
+/// `bash <script>` with the host's environment (see `use_host_env`) and the
+/// app's linux_util config file. Every run of linux_util.sh starts here.
+pub(crate) fn script_command(app: &tauri::AppHandle, script: &std::path::Path) -> Command {
+    let mut cmd = Command::new("bash");
+    use_host_env(&mut cmd);
+    if let Some(conf) = settings::linux_util_conf_path(app) {
+        cmd.env("LINUX_UTIL_CONFIG_FILE", conf);
+    }
+    cmd.arg(script);
+    cmd
+}
+
 /// Runs `linux_util.sh --list --json --no-color` and returns the JSON document.
 /// Anything printed before the first `{` (such as a `Detected:` line) is dropped.
 #[tauri::command]
 async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
-    let script = script_path(&app)?;
+    let mut cmd = script_command(&app, &script_path(&app)?);
     tauri::async_runtime::spawn_blocking(move || {
-        let mut cmd = Command::new("bash");
-        use_host_env(&mut cmd);
         let output = cmd
-            .arg(&script)
             .args(["--list", "--json", "--no-color"])
             .output()
             .map_err(|e| format!("Could not start linux_util.sh: {e}"))?;
@@ -136,13 +148,21 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(actions::RunState::default())
         .invoke_handler(tauri::generate_handler![
             run_list,
             detected_distro,
             actions::run_action,
             actions::askpass_reply,
-            actions::cancel_run
+            actions::cancel_run,
+            profiles::list_profiles,
+            profiles::import_profile,
+            profiles::export_profile,
+            settings::get_settings,
+            settings::save_settings,
+            logs::list_logs,
+            logs::read_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running Linux_Util Desktop");

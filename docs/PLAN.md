@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 5 (packaging and release) complete. Next: Stage 6.**
+**Current stage: 6 (polish) complete. Next: Stage 7 (version and updates).**
 
 ## Decisions made
 
@@ -55,7 +55,7 @@ Fallback if it does not: run the script inside a PTY and answer the prompt.
 ### Stage 0: Groundwork (done)
 - [x] Repo created at `~/Projects/github/linux_util_desktop`
 - [x] README, PLAN, CLI contract, LICENSE, .gitignore
-- [ ] First commit and GitHub repo (waiting on go-ahead)
+- [x] First commit and GitHub repo (`acebmxer/linux_util_desktop`; v0.1.0 released 2026-10-14)
 
 ### Stage 1: Skeleton
 Goal: an empty Linux_Util Desktop window that builds and launches.
@@ -117,11 +117,21 @@ path. Checked on Arch: a full Parallel Downloads install from the AppImage,
 password dialog included, succeeded and showed Installed.
 
 ### Stage 6: Polish
-- [ ] Profiles (`--export-profile`, `--import-profile`)
-- [ ] Update-all button
-- [ ] Log viewer for linux_util's logs
-- [ ] Settings (config file, theme)
-- [ ] Accessibility and keyboard navigation (match the TUI keys where sensible)
+- [x] Profiles (`--export-profile`, `--import-profile`): a Profiles dialog lists linux_util's built-in profiles (read with `--export-profile`); choosing one replaces the selection, leaving out names this distro does not offer. Import reads a profile file (one profile is selected at once, several are listed); export saves the selection as a one-profile file. The app applies profiles through its own queue, not `--import-profile`, so each utility gets its own status; its exported files still work with `--import-profile` (checked with `--dry-run`). Tested in an Ubuntu 22.04 container under a virtual display, not on a real desktop
+- [x] Update-all button: in the action bar, always shown; one `--update-all` run with the dry-run toggle (dry run checked in the container)
+- [x] Log viewer for linux_util's logs: the `logs/` folder of the per-user copy actions run from, newest first, `*_latest.log` links left out, long logs shown from the end. Staging that copy no longer copies the bundled `logs/` (a source checkout's `--list` logs were showing up)
+- [x] Settings (config file, theme): theme (system, light, dark) and the five linux_util config keys the app's runs read (`auto_confirm`, `verbose`, `debug`, `log_retention_days`, `max_logs_per_day`), kept in the app config folder; `linux_util.conf` there holds only changed keys and is passed in `LINUX_UTIL_CONFIG_FILE`. Retry, DNS and disk-space keys are left out: only the terminal menu reads them
+- [x] Accessibility and keyboard navigation: TUI keys `/`, Esc, arrows, Space, A, D (Enter, U and Q left out: a stray key should not start an install or close the window); the list is one tab stop, labelled controls and dialogs, live status text, visible focus
+
+All of Stage 6 tested in an Ubuntu 22.04 container under a virtual display, not on a real desktop.
+
+### Stage 7: Version and updates
+Goal: see which version is running, and get a newer release from inside the app.
+- [ ] Show the app version and the bundled linux_util version (`vendor/linux_util.VERSION`) in the window
+- [ ] Check the GitHub releases of this repo for a newer version on launch, with a Settings switch to turn the check off; show what changed
+- [ ] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`
+
+A newer linux_util arrives in a new app release (open question 4): the app updates as a whole, unlike linux_util's own `git pull` self-update.
 
 ### Later (not committed to)
 - Update check on launch that offers a newer linux_util

@@ -20,7 +20,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const OPS: [&str; 3] = ["install", "uninstall", "update"];
+const OPS: [&str; 4] = ["install", "uninstall", "update", "update-all"];
+/// The one queue entry an `update-all` run shows.
+const UPDATE_ALL_LABEL: &str = "All installed utilities";
 const SOCKET_ENV: &str = "LU_ASKPASS_SOCK";
 
 #[derive(Default)]
@@ -223,13 +225,17 @@ fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, sto
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Copies `from` into `to`, leaving out top-level entries named in `skip`.
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
+        if skip.iter().any(|s| entry.file_name() == *s) {
+            continue;
+        }
         let (src, dst) = (entry.path(), to.join(entry.file_name()));
         if entry.file_type()?.is_dir() {
-            copy_tree(&src, &dst)?;
+            copy_tree(&src, &dst, &[])?;
         } else {
             std::fs::copy(&src, &dst)?;
         }
@@ -237,16 +243,21 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where actions run linux_util from; its `logs/` directory is inside.
+pub(crate) fn staged_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("No app data directory: {e}"))?
+        .join("linux_util"))
+}
+
 /// `linux_util.sh` writes `logs/` next to itself, and the bundled copy may sit
 /// in a read-only directory. Actions therefore run from a per-user copy in the
 /// app data directory, refreshed when the bundled version changes. `logs/` is kept.
 fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
     let src = bundled.parent().ok_or("Bundled linux_util.sh has no parent directory")?;
-    let dest = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("No app data directory: {e}"))?
-        .join("linux_util");
+    let dest = staged_dir(app)?;
     let version = std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default();
     let marker = dest.join(".staged-version");
     let current = std::fs::read_to_string(&marker).ok();
@@ -261,14 +272,16 @@ fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
                 let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
             }
         }
-        copy_tree(src, &dest).map_err(err)?;
+        // A source checkout's vendor/ collects logs from `--list` runs; they are
+        // not this copy's logs.
+        copy_tree(src, &dest, &["logs"]).map_err(err)?;
         std::fs::write(&marker, version.trim()).map_err(err)?;
     }
     Ok(dest.join("linux_util.sh"))
 }
 
 /// Drops ANSI escape sequences and keeps only what a carriage return left last.
-fn clean_line(raw: &[u8]) -> String {
+pub(crate) fn clean_line(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
     let text = text.trim_end_matches(['\n', '\r']);
     let text = text.rsplit('\r').next().unwrap_or("");
@@ -342,14 +355,15 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
             continue;
         }
         let _ = app.emit("run-item", ItemEvent { index, name, state: "running", code: None });
-        let mut cmd = Command::new("bash");
-        crate::use_host_env(&mut cmd);
-        cmd.arg(script);
+        let mut cmd = crate::script_command(app, script);
         if dry_run {
             cmd.arg("--dry-run");
         }
-        cmd.args(["--no-color", &format!("--{op}"), name])
-            .env("PATH", &path)
+        cmd.args(["--no-color", &format!("--{op}")]);
+        if op != "update-all" {
+            cmd.arg(name);
+        }
+        cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
             .stdin(Stdio::null())
@@ -403,6 +417,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
 
 /// Starts a queue of `op` runs, one utility at a time. Progress arrives as the
 /// `run-item`, `run-output`, `askpass-request` and `run-done` events.
+/// `update-all` takes no names: it is one `--update-all` run.
 #[tauri::command]
 pub fn run_action(
     app: AppHandle,
@@ -414,6 +429,7 @@ pub fn run_action(
     if !OPS.contains(&op.as_str()) {
         return Err(format!("Unknown action: {op}"));
     }
+    let names = if op == "update-all" { vec![UPDATE_ALL_LABEL.to_string()] } else { names };
     if names.is_empty() {
         return Err("Nothing selected".to_string());
     }

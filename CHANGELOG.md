@@ -11,6 +11,32 @@ release is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **Keyboard shortcuts** following linux_util's terminal menu: `/` search,
+  `Esc` clear it, arrows, `Home` and `End` move through the list, `Space`
+  selects, left and right switch category, `A` selects everything shown and `D`
+  deselects. The list is a single tab stop, controls and dialogs are labelled
+  for screen readers, and keyboard focus is always visible.
+- **Settings**: theme (follow the system, light or dark), and the linux_util
+  options that affect the app's runs: answer yes to installer questions,
+  verbose and debug output, and how long logs are kept.
+- **Logs**: a Logs window lists linux_util's log files, newest first, and
+  shows the one picked, with a copy button.
+- **Update all**: one button runs linux_util's `--update-all`, with the dry-run
+  toggle. The action bar is now always shown.
+- **Profiles**: a Profiles button lists linux_util's built-in profiles
+  (Developer Workstation, Home Desktop and the rest). Choosing one selects its
+  utilities, ready to install or update; any it names that this distro does not
+  offer are left out and listed. Profiles can be imported from a file, and the
+  current selection exported to one, in linux_util's own format, so an
+  exported file also works with `linux_util.sh --import-profile`.
+
+### Fixed
+
+- Logs left in the bundled linux_util folder by a source checkout are no longer
+  copied into the per-user copy that actions run from.
+
 ## [0.1.0] - 2026-10-14
 
 ### Added
