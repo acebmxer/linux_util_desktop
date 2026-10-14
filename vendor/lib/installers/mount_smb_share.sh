@@ -1,0 +1,408 @@
+#!/bin/bash
+# Mount SMB Share — interactively discover and mount an SMB/CIFS share from a
+# remote server, writing a persistent entry to /etc/fstab.
+
+# ── Version / status ──────────────────────────────────────────────────────────
+get_version_mount_smb_share() {
+    local count=0
+    if [[ -f /etc/fstab ]]; then
+        count=$(grep -c "# linux_util:smb " /etc/fstab 2>/dev/null || true)
+    fi
+    [[ "$count" -gt 0 ]] && echo "${count} SMB share(s) configured via linux_util"
+}
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+# Ensure cifs-utils and smbclient are installed.
+_msb_ensure_smb_tools() {
+    if command -v smbclient &>/dev/null && command -v mount.cifs &>/dev/null; then
+        return 0
+    fi
+    warn "SMB client tools not found. Attempting to install..."
+    case "$DISTRO_FAMILY" in
+        debian)  sudo apt-get install -y cifs-utils smbclient ;;
+        fedora)  pkg_install cifs-utils samba-client ;;
+        rhel)    pkg_install cifs-utils samba-client ;;
+        arch)    pkg_install cifs-utils smbclient ;;
+        suse)    pkg_install cifs-utils samba-client ;;
+        *)
+            warn "Cannot auto-install SMB tools on this distro. Install cifs-utils and smbclient manually."
+            return 1
+            ;;
+    esac
+    if ! command -v smbclient &>/dev/null || ! command -v mount.cifs &>/dev/null; then
+        error "SMB tools still not available after install attempt."
+        return 1
+    fi
+    return 0
+}
+
+# Query disk shares from a server using a temporary credentials file.
+# Outputs one pipe-delimited record per share: INDEX|SHARE_NAME
+_msb_share_list() {
+    local server="$1"
+    local username="$2"
+    local password="$3"
+
+    local tmp_creds
+    tmp_creds=$(mktemp)
+    chmod 600 "$tmp_creds"
+    printf 'username=%s\npassword=%s\n' "$username" "$password" > "$tmp_creds"
+
+    local raw
+    raw=$(smbclient -L "//${server}" -A "$tmp_creds" 2>/dev/null)
+    rm -f "$tmp_creds"
+
+    local idx=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]+([^[:space:]]+)[[:space:]]+Disk ]]; then
+            local share_name="${BASH_REMATCH[1]}"
+            [[ "$share_name" == *'$' ]] && continue   # skip administrative shares
+            (( idx++ )) || true
+            printf '%d|%s\n' "$idx" "$share_name"
+        fi
+    done <<< "$raw"
+}
+
+# Derive a sanitised filename stem from a server name.
+_msb_creds_path() {
+    local server="$1"
+    local stem
+    stem=$(printf '%s' "$server" | tr -cs 'A-Za-z0-9._-' '_')
+    stem="${stem%_}"
+    printf '%s/.smb-credentials-%s' "$HOME" "$stem"
+}
+
+# Add a KDE Plasma Places entry so the mount appears under "Remote" in Dolphin.
+_msb_add_kde_place() {
+    local smb_source="$1"   # e.g. //10.0.0.1/data
+    local mount_point="$2"
+
+    local places_file="${HOME}/.local/share/user-places.xbel"
+    [[ -f "$places_file" ]] || return 0
+
+    local udi="/org/kde/fstab/${smb_source}:${mount_point}"
+    grep -qF "$udi" "$places_file" && return 0
+
+    python3 - "$places_file" "$udi" <<'PYEOF'
+import sys
+path, udi = sys.argv[1], sys.argv[2]
+entry = (
+    ' <separator>\n'
+    '  <info>\n'
+    '   <metadata owner="http://www.kde.org">\n'
+    f'    <UDI>{udi}</UDI>\n'
+    '    <isSystemItem>true</isSystemItem>\n'
+    '   </metadata>\n'
+    '  </info>\n'
+    ' </separator>\n'
+)
+with open(path) as f:
+    content = f.read()
+with open(path, 'w') as f:
+    f.write(content.replace('</xbel>', entry + '</xbel>'))
+PYEOF
+    info "Added KDE Places entry: ${mount_point}"
+}
+
+# ── Main interactive function ─────────────────────────────────────────────────
+setup_mount_smb_share() {
+    echo ""
+    echo "${BOLD:-}${CYAN:-}════════════════════════════════════════════════════════════════${RESET:-}"
+    echo "${BOLD:-}${CYAN:-}  Mount SMB Share                                                ${RESET:-}"
+    echo "${BOLD:-}${CYAN:-}════════════════════════════════════════════════════════════════${RESET:-}"
+    echo ""
+
+    # ── Step 1: Ensure SMB tools are present ─────────────────────────────────
+    _msb_ensure_smb_tools || return 1
+
+    local server="" username="" password=""
+
+    while true; do
+        # ── Step 2: Prompt for server (blank reuses last) ─────────────────────
+        local _hint=""
+        [[ -n "$server" ]] && _hint=" [${server}]"
+        while true; do
+            read -rp "SMB server IP or hostname${_hint}: " _input < /dev/tty
+            _input="${_input// /}"
+            [[ -z "$_input" && -n "$server" ]] && _input="$server"
+            if [[ -z "$_input" ]]; then
+                printf '%sServer address cannot be empty.%s\n' "${RED:-}" "${RESET:-}" > /dev/tty
+                continue
+            fi
+            server="$_input"
+            break
+        done
+
+        # ── Step 3: Prompt for credentials ───────────────────────────────────
+        while true; do
+            read -rp "Username: " username < /dev/tty
+            username="${username// /}"
+            [[ -n "$username" ]] && break
+            printf '%sUsername cannot be empty.%s\n' "${RED:-}" "${RESET:-}" > /dev/tty
+        done
+
+        read -rsp "Password (hidden, press ENTER for none): " password < /dev/tty
+        printf '\n' > /dev/tty
+
+        # ── Step 4: Discover shares ───────────────────────────────────────────
+        info "Querying SMB shares on ${server}..."
+        local -a shares=()
+        mapfile -t shares < <(_msb_share_list "$server" "$username" "$password")
+
+        if (( ${#shares[@]} == 0 )); then
+            error "No accessible SMB shares found on ${server}."
+            warn "Check credentials, server reachability, and that shares are visible."
+            local _retry
+            while true; do
+                read -rp "Try a different server? [y/N]: " _retry < /dev/tty
+                case "${_retry,,}" in
+                    y|yes) server=""; break ;;
+                    n|no|'') return 1 ;;
+                    *) echo "  Please enter Y or N." ;;
+                esac
+            done
+            continue
+        fi
+
+        # ── Step 5: Display shares table ─────────────────────────────────────
+        {
+            printf '\n'
+            printf '  %-4s  %s\n' "#" "Share Name"
+            printf '  %s\n' "────────────────────────────────────────"
+            local share_entry
+            for share_entry in "${shares[@]}"; do
+                IFS='|' read -r idx share_name <<< "$share_entry"
+                printf '  %-4s  %s\n' "${idx})" "$share_name"
+            done
+            printf '\n  0)    Cancel\n\n'
+        } > /dev/tty
+
+        # ── Step 6: Multi-share selection ────────────────────────────────────
+        local total=${#shares[@]}
+        local -a selected=()
+        while true; do
+            read -rp "Select shares to mount [0 to cancel, e.g. 1  1,3,4  1-4]: " choice < /dev/tty
+            choice="${choice// /}"
+            if [[ "$choice" == "0" ]]; then
+                info "Mount cancelled."
+                return 0
+            fi
+            mapfile -t selected < <(_parse_multi_selection "$choice" "$total")
+            if (( ${#selected[@]} == 0 )); then
+                printf '%sInvalid selection. Use numbers 1-%d, commas, or ranges (e.g. 1,3  2-4).%s\n' \
+                    "${RED:-}" "$total" "${RESET:-}" > /dev/tty
+                continue
+            fi
+            break
+        done
+
+        # ── Steps 7–14: Mount each selected share ─────────────────────────────
+        local creds_file
+        creds_file=$(_msb_creds_path "$server")
+        local fstab_opts
+        fstab_opts="credentials=${creds_file},uid=$(id -u),gid=$(id -g),nofail,_netdev,iocharset=utf8"
+
+        local sel_idx _share_num=0
+        for sel_idx in "${selected[@]}"; do
+            (( _share_num++ )) || true
+
+            local sel_entry="${shares[$((sel_idx - 1))]}"
+            IFS='|' read -r _ sel_share <<< "$sel_entry"
+
+            local default_subfolder
+            default_subfolder=$(printf '%s' "$sel_share" | tr -cs 'A-Za-z0-9._-' '_')
+            default_subfolder="${default_subfolder%_}"
+            [[ -z "$default_subfolder" || "$default_subfolder" == "_" ]] && default_subfolder="smb"
+
+            # ── Step 7: Share header ──────────────────────────────────────────
+            {
+                printf '\n'
+                printf '  ════════════════════════════════════════════════════════════════════════════\n'
+                printf '  Share %d of %d: //%s/%s\n' "$_share_num" "${#selected[@]}" "$server" "$sel_share"
+                printf '  ════════════════════════════════════════════════════════════════════════════\n'
+                printf '\n'
+            } > /dev/tty
+
+            # ── Step 8: Mount location ────────────────────────────────────────
+            local default_mount="/mnt/${default_subfolder}"
+            {
+                printf '  Enter the full path where this share should be mounted.\n'
+                printf '  Examples: /mnt/%s  or  /home/%s/mnt/%s\n' \
+                    "$default_subfolder" "$USER" "$default_subfolder"
+                printf '  Press ENTER to use the default: %s\n\n' "$default_mount"
+            } > /dev/tty
+
+            local mount_point
+            while true; do
+                read -rp "Mount point [default: ${default_mount}]: " mount_point < /dev/tty
+
+                [[ -z "$mount_point" ]] && mount_point="$default_mount"
+
+                if [[ "$mount_point" != /* ]]; then
+                    printf '%sPath must be absolute (start with /).%s\n' "${RED:-}" "${RESET:-}" > /dev/tty
+                    continue
+                fi
+
+                mount_point="${mount_point%/}"
+                if [[ -z "$mount_point" ]]; then
+                    printf '%sCannot mount directly on /.%s\n' "${RED:-}" "${RESET:-}" > /dev/tty
+                    continue
+                fi
+
+                local _valid=true _component
+                while IFS= read -r -d '/' _component || [[ -n "$_component" ]]; do
+                    _component="${_component%$'\n'}"
+                    [[ -z "$_component" ]] && continue
+                    if [[ ! "$_component" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+                        _valid=false
+                        break
+                    fi
+                done <<< "${mount_point#/}/"
+
+                if [[ "$_valid" == "false" ]]; then
+                    printf '%sEach path component must start with a letter or digit and contain only letters, numbers, underscores, hyphens, or dots.%s\n' \
+                        "${RED:-}" "${RESET:-}" > /dev/tty
+                    continue
+                fi
+
+                break
+            done
+
+            # ── Step 9: Summary & confirmation ───────────────────────────────
+            local smb_source="//${server}/${sel_share}"
+            {
+                printf '\n'
+                printf '  Server:      %s\n'  "$server"
+                printf '  Share:       %s\n'  "$sel_share"
+                printf '  Source:      %s\n'  "$smb_source"
+                printf '  Mount point: %s\n'  "$mount_point"
+                printf '  Credentials: %s\n'  "$creds_file"
+                printf '  fstab opts:  %s  0 0\n' "$fstab_opts"
+                printf '\n'
+            } > /dev/tty
+
+            local confirm
+            while true; do
+                read -rp "Proceed? [y/N]: " confirm < /dev/tty
+                case "${confirm,,}" in
+                    y|yes) break ;;
+                    n|no|'') info "Skipped ${smb_source}."; continue 2 ;;
+                    *) echo "  Please enter Y or N." ;;
+                esac
+            done
+
+            # ── Dry-run path ──────────────────────────────────────────────────
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                if [[ "$mount_point" != "$HOME"* ]]; then
+                    info "[Dry run] Would create directory (as root, then chown to ${USER}): ${mount_point}"
+                else
+                    info "[Dry run] Would create directory: ${mount_point}"
+                fi
+                info "[Dry run] Would write credentials file: ${creds_file}"
+                info "[Dry run] Would back up /etc/fstab"
+                info "[Dry run] Would append to /etc/fstab:"
+                printf '  # linux_util:smb %s → %s\n' "$smb_source" "$mount_point"
+                printf '  %s\t%s\tcifs\t%s\t0 0\n' "$smb_source" "$mount_point" "$fstab_opts"
+                info "[Dry run] Would run: sudo mount ${mount_point}"
+                continue
+            fi
+
+            # ── Step 10: Guard — check fstab for collisions ───────────────────
+            if grep -qsF "$smb_source" /etc/fstab; then
+                warn "${smb_source} already has an entry in /etc/fstab."
+                local overwrite
+                while true; do
+                    read -rp "Continue anyway and add a second entry? [y/N]: " overwrite < /dev/tty
+                    case "${overwrite,,}" in
+                        y|yes) break ;;
+                        n|no|'') info "Skipped ${smb_source}."; continue 2 ;;
+                        *) echo "  Please enter Y or N." ;;
+                    esac
+                done
+            fi
+
+            if grep -qsE "[[:space:]]${mount_point}[[:space:]]" /etc/fstab; then
+                error "Mount point ${mount_point} is already present in /etc/fstab. Skipping."
+                continue
+            fi
+
+            # ── Step 11: Create mount point directory ─────────────────────────
+            if [[ ! -d "$mount_point" ]]; then
+                local _ancestor="$mount_point"
+                while [[ ! -e "$_ancestor" ]]; do
+                    _ancestor=$(dirname "$_ancestor")
+                done
+
+                if [[ -w "$_ancestor" ]]; then
+                    mkdir -p "$mount_point" || { error "Failed to create directory: ${mount_point}. Skipping."; continue; }
+                else
+                    run_as_root mkdir -p "$mount_point" || { error "Failed to create directory: ${mount_point}. Skipping."; continue; }
+                    if [[ "$mount_point" != "$HOME"* ]]; then
+                        run_as_root chown "${USER}:${USER}" "$mount_point" || \
+                            warn "Could not set ownership of ${mount_point} to ${USER} — you may need to access it as root."
+                    fi
+                fi
+                info "Created mount point: ${mount_point}"
+            else
+                info "Mount point already exists: ${mount_point}"
+            fi
+
+            # ── Step 12: Write credentials file ──────────────────────────────
+            printf 'username=%s\npassword=%s\n' "$username" "$password" > "$creds_file"
+            chmod 600 "$creds_file"
+            info "Credentials written to ${creds_file}"
+
+            # ── Step 13: Back up fstab ────────────────────────────────────────
+            local fstab_backup="/etc/fstab.bak.$(date +%Y%m%d_%H%M%S)"
+            run_as_root cp /etc/fstab "$fstab_backup" || { error "Failed to back up /etc/fstab"; return 1; }
+            info "fstab backed up to ${fstab_backup}"
+
+            # ── Step 14: Append fstab entry ───────────────────────────────────
+            local fstab_comment
+            fstab_comment="# linux_util:smb ${smb_source} → ${mount_point} — added $(date '+%Y-%m-%d %H:%M:%S')"
+            local fstab_entry
+            fstab_entry=$(printf '%s\t%s\tcifs\t%s\t0 0' "$smb_source" "$mount_point" "$fstab_opts")
+
+            printf '\n%s\n%s\n' "$fstab_comment" "$fstab_entry" \
+                | run_as_root tee -a /etc/fstab > /dev/null || {
+                error "Failed to write to /etc/fstab. Restoring backup..."
+                run_as_root cp "$fstab_backup" /etc/fstab
+                return 1
+            }
+
+            # ── Step 15: Mount ────────────────────────────────────────────────
+            run_as_root mount "$mount_point" || {
+                error "mount failed for ${mount_point}."
+                warn "The fstab entry was written — review /etc/fstab and try: sudo mount ${mount_point}"
+                warn "Check that the server is reachable and the credentials are correct."
+                continue
+            }
+
+            _msb_add_kde_place "$smb_source" "$mount_point"
+
+            echo ""
+            info "SMB share mounted successfully."
+            info "  Source:      ${smb_source}"
+            info "  Mount point: ${mount_point}"
+            info "  Backup:      ${fstab_backup}"
+            echo ""
+        done
+
+        # ── Offer another server ──────────────────────────────────────────────
+        local _more
+        while true; do
+            read -rp "Mount shares from another server? [y/N]: " _more < /dev/tty
+            case "${_more,,}" in
+                y|yes) break ;;
+                n|no|'') break 2 ;;
+                *) echo "  Please enter Y or N." ;;
+            esac
+        done
+    done
+
+    return 0
+}
+
+# ── Lifecycle stubs ───────────────────────────────────────────────────────────
+update_mount_smb_share()    { setup_mount_smb_share; }

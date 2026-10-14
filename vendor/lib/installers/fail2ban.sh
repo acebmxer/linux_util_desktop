@@ -1,0 +1,28 @@
+#!/bin/bash
+# fail2ban installer functions
+
+install_fail2ban() {
+    info "Installing fail2ban..."
+    pkg_install fail2ban
+    sudo systemctl enable --now fail2ban
+    info "fail2ban installed and enabled."
+}
+
+check_fail2ban() {
+    _have_cmd fail2ban-client
+}
+
+uninstall_fail2ban() {
+    info "Removing fail2ban..."
+    sudo systemctl disable --now fail2ban 2>/dev/null || true
+    pkg_remove fail2ban
+}
+
+update_fail2ban() {
+    info "Updating fail2ban..."
+    sudo apt-get install -y --only-upgrade fail2ban
+}
+
+get_version_fail2ban() {
+    _run_native fail2ban-client --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo ""
+}

@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 1 (skeleton) built. Next: Stage 2.**
+**Current stage: 2 (read-only list) built. Next: Stage 3.**
 
 ## Decisions made
 
@@ -66,13 +66,13 @@ Goal: an empty Linux_Util Desktop window that builds and launches.
 
 ### Stage 2: Read-only list
 Goal: see every utility and its install status. Nothing can change the system.
-- [ ] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now)
-- [ ] Rust command runs `--list --json --no-color`, strips the `Detected:` line
-- [ ] UI list with installed badge and version
-- [ ] Search box
-- [ ] Categories (JSON fields exist on linux_util `dev`, unreleased)
-- [ ] Detected distro shown in the header
-- [ ] Light and dark theme following the system
+- [x] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now): v1.8.0
+- [x] Rust command runs `--list --json --no-color`, strips the `Detected:` line
+- [x] UI list with installed badge and version
+- [x] Search box
+- [x] Categories (JSON fields exist on linux_util `dev`, unreleased; v1.8.0 has none, so the UI shows a flat list until a tag with them is vendored)
+- [x] Detected distro shown in the header (read from `/etc/os-release`; v1.8.0 prints no `Detected:` line)
+- [x] Light and dark theme following the system
 
 ### Stage 3: Actions
 Goal: install, uninstall and update from the app.

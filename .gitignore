@@ -7,3 +7,4 @@ src-tauri/target/
 *.rpm
 .DS_Store
 *.log
+vendor/logs/

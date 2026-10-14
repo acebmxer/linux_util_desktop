@@ -27,8 +27,10 @@ Relied on: `schema` equals `linux_util/list/v1`; `utilities[]` entries have
 `name` (string), `installed` (bool) and `version` (string or null).
 
 Notes:
-- The command prints a `Detected: ...` line **before** the JSON on stdout. The
-  app must strip everything before the first `{` or ask linux_util to drop it.
+- v1.8.0 prints only a blank line before the JSON. The app drops everything
+  before the first `{` in case a `Detected: ...` line is added.
+- The script creates `logs/` next to itself on every run, including `--list`.
+  It still exits 0 when that directory is read-only, but prints errors to stderr.
 - Each utility has `category` and `subcategory` (strings, `null` when absent; system tasks are category "System Tasks").
 
 ## Exit codes and output

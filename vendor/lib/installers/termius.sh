@@ -1,0 +1,491 @@
+#!/bin/bash
+# Termius SSH Client installer functions
+# https://termius.com/
+#
+# Upstream publishes exactly two Linux artifacts: a .deb and a snap. There is no
+# .rpm, no AppImage and no plain tarball (every other guessable name under
+# https://www.termius.com/download/linux/ returns 404), which shapes the whole
+# file:
+#
+#   - debian: the upstream .deb installs directly.
+#   - everyone else: the .deb payload is unpacked natively into /opt.
+#
+# Why NOT the AUR on Arch (this used to be repo_or_aur termius-deb):
+#
+#   termius-deb does not repack the .deb as shipped — it keeps only resources/
+#   (app.asar and friends), throws upstream's bundled Electron away, and execs
+#   the app on a system runtime instead:
+#
+#       _electron=electron21
+#       depends=("$_electron-bin" ...)
+#       exec electron21 /opt/termius/app.asar "$@"
+#
+#   Electron 21 shipped in September 2022 and went EOL around October 2023.
+#   Arch's repos carry electron39..electron43, nothing close, so that dependency
+#   can only come from electron21-bin in the AUR — last touched June 2024, four
+#   votes, an unpatched ~4-year-old Chromium. That is a bad runtime for any
+#   Electron app and a worse one for the program holding the user's SSH keys.
+#   Unpacking upstream's .deb keeps the Electron that Termius actually ships
+#   and tests against.
+#
+#   Note the AUR package installs to /opt/termius (lowercase), /usr/bin/termius
+#   and termius.desktop — no path overlaps this file's /opt/Termius,
+#   /usr/local/bin/termius-app and termius-app.desktop, so the two can coexist.
+#
+# Why NOT Flatpak on the rpm families (this used to be a Flathub install):
+#
+#   A terminal client's whole job is to exec host binaries, and a sandbox is
+#   structurally bad at that. Inside the Flatpak, /usr belongs to the
+#   org.freedesktop.Platform runtime, not to the host — so /usr/bin/zsh does not
+#   exist no matter what filesystem permissions are granted, and the host copy
+#   is only reachable at /run/host/usr/bin/zsh (and only after
+#   --filesystem=host). $SHELL is not passed through either, so Termius's
+#   first-run detection falls back to /bin/sh and pins that into its
+#   "Local Terminal Path" setting permanently. The result is a login shell the
+#   user never chose, with none of their PATH or shell config.
+#
+#   Unpacking the .deb sidesteps all of it: the app runs unconfined, sees the
+#   real /usr, and auto-detects $SHELL exactly as it does on Debian.
+#
+#   One gap survives the native install, and it is Termius's own doing rather
+#   than the sandbox's: it reads $SHELL to pick the binary, then strips it from
+#   the environment it hands the pty. Compare the two processes — the Termius
+#   helper carries SHELL=/usr/bin/zsh, and the zsh it spawns has the identical
+#   variable set minus SHELL. zsh does not set $SHELL itself (that is normally
+#   PAM's job at login), so it stays empty for the session and callers that read
+#   it fail — `toolbox create` exits with "failed to get the current user's
+#   default shell". The fix lives in zsh_setup.sh, which drops a guard into
+#   ~/.zshenv; nothing here can repair an environment the app builds at runtime.
+#
+# The payload is a self-contained Electron bundle — verified with ldd against a
+# current Fedora system, every linked library resolves from the runtime deps
+# installed below. Only two things from the .deb are deliberately dropped:
+# the AppArmor postinst (Debian-only; rpm families use SELinux) and
+# /etc/cron.daily/termius-app, which is an apt-repo self-updater that would be
+# dead weight at best on a system with no apt.
+
+# --- Termius SSH Client ---
+
+_TERMIUS_DEB_URL="https://www.termius.com/download/linux/Termius.deb"
+_TERMIUS_PREFIX="/opt/Termius"
+_TERMIUS_APP="$_TERMIUS_PREFIX/termius-app"
+_TERMIUS_LAUNCHER="/usr/local/bin/termius-app"
+_TERMIUS_DESKTOP="/usr/share/applications/termius-app.desktop"
+# Kept inside the payload dir so uninstalling the tree takes the marker with it.
+_TERMIUS_VERSION_FILE="$_TERMIUS_PREFIX/.linux_util-version"
+
+check_termius() {
+    [[ -x "$_TERMIUS_APP" ]] && return 0
+    _have_cmd termius || \
+        _have_cmd termius-app || \
+        pkg_check_installed termius || \
+        pkg_check_installed termius-deb || \
+        pkg_check_installed termius-app || \
+        (has_snap && snap list termius-app &>/dev/null) || \
+        (flatpak_is_installed termius)
+}
+
+# Runtime libraries for the bundled Electron, translated from the .deb's own
+# Depends: line (libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils
+# libatspi2.0-0 libuuid1 libsecret-1-0), plus libgbm and libasound — both are
+# linked by termius-app but missing from Depends upstream.
+#
+# Names are best-effort per family: a rename upstream should not abort the
+# install, because a desktop system almost always has these already — the ldd
+# check after staging is what actually decides whether the result is usable.
+_termius_install_runtime_deps() {
+    local -a deps=()
+    case "$DISTRO_FAMILY" in
+        fedora|rhel)
+            deps=(gtk3 libnotify nss libXScrnSaver libXtst xdg-utils
+                  at-spi2-atk libuuid libsecret mesa-libgbm alsa-lib)
+            ;;
+        suse)
+            deps=(gtk3 libnotify4 mozilla-nss libXss1 libXtst6 xdg-utils
+                  at-spi2-atk-common libuuid1 libsecret-1-0 libgbm1 libasound2)
+            ;;
+        arch)
+            # Unlike the rpm branches above, every one of these was checked
+            # against archlinux.org and resolves in core/extra: at-spi2-atk is
+            # merged into at-spi2-core here, libuuid ships in util-linux-libs
+            # (already part of base) and libgbm comes from mesa.
+            deps=(gtk3 libnotify nss libxss libxtst xdg-utils
+                  at-spi2-core util-linux-libs libsecret mesa alsa-lib)
+            ;;
+    esac
+    (( ${#deps[@]} == 0 )) && return 0
+
+    local dep
+    local -a missing=()
+    for dep in "${deps[@]}"; do
+        pkg_check_installed "$dep" || missing+=("$dep")
+    done
+    (( ${#missing[@]} == 0 )) && return 0
+
+    # One transaction for the whole set — installing these one at a time means
+    # a separate depsolve per package. If the batch fails, the likely cause is
+    # a single name being wrong for this release, so retry individually rather
+    # than let one bad name cost the user all the others.
+    if ! pkg_install "${missing[@]}"; then
+        for dep in "${missing[@]}"; do
+            pkg_check_installed "$dep" && continue
+            pkg_install "$dep" || \
+                verbose "Termius: optional runtime dependency '${dep}' unavailable — continuing."
+        done
+    fi
+    return 0
+}
+
+# refresh_desktop_caches only covers ~/.local/share, but the native install
+# writes under /usr/share. Rebuilding mimeinfo.cache here is what actually
+# activates the x-scheme-handler/termius registration carried in upstream's
+# .desktop file.
+_termius_refresh_system_caches() {
+    command -v update-desktop-database &>/dev/null && \
+        sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+    command -v gtk-update-icon-cache &>/dev/null && \
+        sudo gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true
+    return 0
+}
+
+# Report any unresolved shared libraries in the staged binary. Non-fatal: it
+# names the missing sonames instead of letting the app fail silently at launch.
+_termius_check_libs() {
+    command -v ldd &>/dev/null || return 0
+    local missing
+    missing=$(ldd "$_TERMIUS_APP" 2>/dev/null | awk '/not found/{print $1}' | sort -u | tr '\n' ' ')
+    if [[ -n "${missing// /}" ]]; then
+        warn "Termius is missing shared libraries: ${missing}"
+        warn "Install the packages providing them, or Termius will not start."
+    fi
+}
+
+# Extract one member of a .deb into a directory.
+#
+# tar cannot sniff compression when it is reading a pipe — it bails with
+# "Archive is compressed. Use -J option" rather than auto-detecting, because it
+# has no way to rewind. The member name is the only reliable signal, so
+# dispatch the decompressor off the suffix. Upstream has changed this before
+# (gz -> xz, and today control.tar.gz sits next to data.tar.xz in the same
+# archive), hence handling the whole set rather than hardcoding one.
+_termius_extract_member() {
+    local deb="$1" member="$2" dest="$3"
+    local -a decomp
+    case "$member" in
+        *.tar)     decomp=(cat) ;;
+        *.tar.gz)  decomp=(gzip -dc) ;;
+        *.tar.xz)  decomp=(xz -dc) ;;
+        *.tar.bz2) decomp=(bzip2 -dc) ;;
+        *.tar.zst) decomp=(zstd -dc) ;;
+        *)
+            error "Unsupported compression on .deb member '${member}'."
+            return 1
+            ;;
+    esac
+    if ! command -v "${decomp[0]}" &>/dev/null; then
+        error "'${decomp[0]}' is required to unpack '${member}' but is not installed."
+        return 1
+    fi
+    ar p "$deb" "$member" 2>/dev/null | "${decomp[@]}" 2>/dev/null | tar x -C "$dest" 2>/dev/null
+}
+
+# Download the upstream .deb and unpack its payload into /opt. No dpkg involved
+# — the archive is opened with ar + tar, which is why binutils is ensured first.
+_termius_install_native() {
+    if ! command -v ar &>/dev/null; then
+        info "Installing binutils (needed to unpack the Termius .deb)..."
+        pkg_install binutils || { error "Could not install binutils."; return 1; }
+        command -v ar &>/dev/null || { error "'ar' still unavailable after installing binutils."; return 1; }
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/termius-XXXXXX) || return 1
+    CLEANUP_FILES+=("$tmpdir")
+    local deb="$tmpdir/Termius.deb"
+
+    info "Downloading Termius..."
+    wget -qO "$deb" "$_TERMIUS_DEB_URL" || { error "Failed to download Termius."; return 1; }
+    verify_download "$deb" "deb" "Termius" || return 1
+
+    # Member names are matched rather than hardcoded so a compression change
+    # upstream only alters which decompressor _termius_extract_member picks.
+    local data_member control_member
+    data_member=$(ar t "$deb" 2>/dev/null | grep '^data\.tar' | head -1)
+    control_member=$(ar t "$deb" 2>/dev/null | grep '^control\.tar' | head -1)
+    if [[ -z "$data_member" ]]; then
+        error "Termius .deb has no data member — the download is not a Debian package."
+        return 1
+    fi
+
+    mkdir -p "$tmpdir/payload" "$tmpdir/control"
+    if ! _termius_extract_member "$deb" "$data_member" "$tmpdir/payload"; then
+        error "Failed to unpack the Termius .deb payload."
+        return 1
+    fi
+    if [[ ! -x "$tmpdir/payload/opt/Termius/termius-app" ]]; then
+        error "Unpacked Termius payload is missing opt/Termius/termius-app."
+        return 1
+    fi
+
+    # The Electron binary answers --version with its bundled Node version, so
+    # the package metadata is the only real source for the app version.
+    local version=""
+    if [[ -n "$control_member" ]] && \
+       _termius_extract_member "$deb" "$control_member" "$tmpdir/control"; then
+        version=$(awk '/^Version:/{print $2; exit}' "$tmpdir/control/control" 2>/dev/null)
+    fi
+
+    _termius_install_runtime_deps
+
+    # Swap in only after unpacking succeeded, so a failed download cannot leave
+    # a half-removed install behind.
+    info "Installing Termius to ${_TERMIUS_PREFIX}..."
+    sudo rm -rf "$_TERMIUS_PREFIX"
+    sudo mkdir -p /opt
+    sudo cp -a "$tmpdir/payload/opt/Termius" /opt/ || {
+        error "Failed to install Termius to ${_TERMIUS_PREFIX}."
+        return 1
+    }
+    sudo chown -R root:root "$_TERMIUS_PREFIX"
+
+    # cp -a implies --preserve=all, which includes the SELinux context, so the
+    # tree arrives in /opt still labelled with the staging directory's tmp type.
+    # Relabel it to what the /opt policy says it should be; best-effort, since
+    # non-SELinux hosts have no restorecon at all.
+    command -v restorecon &>/dev/null && \
+        sudo restorecon -RF "$_TERMIUS_PREFIX" 2>/dev/null || true
+
+    # Chromium's SUID sandbox helper. It ships 0755 in the .deb and upstream's
+    # postinst never touches it — that maintainer script only renders an
+    # AppArmor profile — so on Debian the sandbox rides entirely on
+    # unprivileged user namespaces being enabled. setuid-root is the other
+    # configuration Chromium documents, and it also works where userns are
+    # restricted; without one of the two Chromium refuses to start rather than
+    # dropping the sandbox.
+    [[ -f "$_TERMIUS_PREFIX/chrome-sandbox" ]] && sudo chmod 4755 "$_TERMIUS_PREFIX/chrome-sandbox"
+
+    sudo ln -sf "$_TERMIUS_APP" "$_TERMIUS_LAUNCHER"
+
+    # Upstream's own .desktop already points Exec at /opt/Termius/termius-app
+    # and registers the x-scheme-handler/termius URL handler, so it is used
+    # verbatim rather than regenerated.
+    if [[ -f "$tmpdir/payload/usr/share/applications/termius-app.desktop" ]]; then
+        sudo install -Dm644 "$tmpdir/payload/usr/share/applications/termius-app.desktop" \
+            "$_TERMIUS_DESKTOP"
+    fi
+
+    local icon rel
+    for icon in "$tmpdir"/payload/usr/share/icons/hicolor/*/apps/termius-app.png; do
+        [[ -f "$icon" ]] || continue
+        rel="${icon#"$tmpdir"/payload/usr/share/icons/}"
+        sudo install -Dm644 "$icon" "/usr/share/icons/$rel"
+    done
+
+    # Written unconditionally — even with no parsed version — because uninstall
+    # keys off this file's existence to tell a native install apart from a
+    # distro-packaged one. Debian's .deb and Arch's termius-deb unpack to the
+    # same /opt/Termius, so the directory alone proves nothing.
+    if [[ -n "$version" ]]; then
+        printf '%s\n' "$version" | sudo tee "$_TERMIUS_VERSION_FILE" >/dev/null
+    else
+        sudo touch "$_TERMIUS_VERSION_FILE"
+    fi
+
+    _termius_refresh_system_caches
+    refresh_desktop_caches
+    _termius_check_libs
+
+    info "Termius installed natively — it will detect \$SHELL (${SHELL:-unset}) and launch it on first run."
+    info "Note: Termius does not pass \$SHELL through to that shell. The zsh_setup module"
+    info "installs a ~/.zshenv guard that restores it; without it, \$SHELL is empty in"
+    info "Termius terminals and tools that read it (e.g. 'toolbox create') will fail."
+}
+
+# Warn when a copy from one of the paths this file used to take is left over.
+# A sandboxed copy keeps its own settings tree, so the user can end up staring
+# at the stale /bin/sh terminal in the wrong copy of the app; a leftover
+# termius-deb is the Arch equivalent — it installs beside the native tree
+# rather than over it, so nothing here removes it, and it would leave the user
+# a second menu entry still running EOL Electron 21.
+_termius_warn_leftover_copy() {
+    if pkg_check_installed termius-deb; then
+        warn "The AUR package termius-deb is also installed; it runs on Electron 21 (EOL since 2023)."
+        warn "It installs to /opt/termius, separate from this install, and adds a second menu entry."
+        warn "Remove it with: sudo pacman -Rs termius-deb"
+    fi
+    if flatpak_is_installed termius; then
+        warn "A Flatpak copy of Termius is also installed and still uses /bin/sh for its local terminal."
+        warn "Remove it with: flatpak uninstall -y com.termius.Termius"
+    fi
+    if has_snap && snap list termius-app &>/dev/null; then
+        warn "A snap copy of Termius is also installed."
+        warn "Remove it with: sudo snap remove termius-app"
+    fi
+}
+
+# Fallback path only (unknown distro family). Grant the sandbox access to the
+# host filesystem so the host shell is at least reachable, and say where it is
+# — /usr inside the sandbox belongs to the runtime, so the host path is the
+# only one that works in Termius's "Local Terminal Path" field.
+_termius_flatpak_shell_hint() {
+    flatpak override --user --filesystem=host com.termius.Termius 2>/dev/null || \
+        sudo flatpak override --filesystem=host com.termius.Termius 2>/dev/null || true
+    warn "Termius is sandboxed here, so it cannot see the host /usr."
+    warn "In Settings -> Terminal, set 'Local Terminal Path' to:"
+    warn "    /run/host${SHELL:-/bin/bash}"
+    warn "Host binaries are not on PATH inside the sandbox; add this to your shell rc if needed:"
+    warn "    [[ -d /run/host/usr/bin ]] && export PATH=\"/run/host/usr/bin:\$PATH\""
+}
+
+install_termius() {
+    info "Installing Termius SSH Client..."
+    ensure_tools
+    case "$DISTRO_FAMILY" in
+        debian)
+            local tmp_deb
+            tmp_deb=$(mktemp /tmp/termius-XXXXXX.deb)
+            CLEANUP_FILES+=("$tmp_deb")
+            wget -q "$_TERMIUS_DEB_URL" -O "$tmp_deb"
+            verify_download "$tmp_deb" "deb" "Termius" || return 1
+            pkg_install "$tmp_deb"
+            rm -f "$tmp_deb"
+            ;;
+        arch)
+            # A derivative that ships a real Termius package in its own repos
+            # still wins — it is signed and tracked by pacman. Probed, never
+            # installed from the AUR: the fallback here is the native unpack,
+            # because dropping the user onto electron21-bin is worse than the
+            # error a failed native install produces. (No Arch repo carries
+            # Termius today, CachyOS included, so this probe is for the future.)
+            if arch_repo_has termius && \
+               pkg_install --needed termius 2>/dev/null; then
+                return 0
+            fi
+            _termius_install_native || return 1
+            _termius_warn_leftover_copy
+            ;;
+        fedora|rhel|suse)
+            _termius_install_native || return 1
+            _termius_warn_leftover_copy
+            ;;
+        *)
+            if has_snap; then
+                sudo snap install termius-app
+            elif ensure_flatpak; then
+                sudo flatpak install -y flathub com.termius.Termius
+                _termius_flatpak_shell_hint
+            else
+                error "snap or flatpak is required to install Termius on ${DISTRO_NAME}."
+                return 1
+            fi
+            ;;
+    esac
+}
+
+uninstall_termius() {
+    info "Uninstalling Termius SSH Client..."
+    # Tracked explicitly and returned at the end: the trailing config cleanup
+    # below always succeeds, so without this the caller would read a removal
+    # failure as success.
+    local rc=0
+    # Gate on the marker, never on /opt/Termius alone: the Debian .deb owns that
+    # same directory, and tearing it out from under dpkg would leave a
+    # registered but gutted package (and delete package-owned icons). The AUR's
+    # termius-deb is not part of this — it installs to /opt/termius, lowercase —
+    # but it is still removed by name in the branch below.
+    if [[ -f "$_TERMIUS_VERSION_FILE" ]]; then
+        sudo rm -rf "$_TERMIUS_PREFIX" || rc=1
+        sudo rm -f "$_TERMIUS_LAUNCHER" "$_TERMIUS_DESKTOP" || rc=1
+        sudo rm -f /usr/share/icons/hicolor/*/apps/termius-app.png || rc=1
+        _termius_refresh_system_caches
+        refresh_desktop_caches
+    elif pkg_check_installed termius-deb; then
+        pkg_remove termius-deb || rc=1
+    elif pkg_check_installed termius; then
+        pkg_remove termius || rc=1
+    elif pkg_check_installed termius-app; then
+        pkg_remove termius-app || rc=1
+    elif has_snap && snap list termius-app &>/dev/null; then
+        sudo snap remove termius-app || rc=1
+    elif flatpak_is_installed termius; then
+        # install_termius installs system-wide via sudo, and a system-scope
+        # Flatpak cannot be removed by an unprivileged user — it fails with
+        # "Flatpak system operation Uninstall not allowed for user". Try user
+        # scope first for copies installed that way, then fall back to system.
+        # --delete-data drops ~/.var/app/com.termius.Termius, matching the
+        # config cleanup this function already does for native installs.
+        flatpak uninstall -y --user --delete-data com.termius.Termius 2>/dev/null || \
+            sudo flatpak uninstall -y --system --delete-data com.termius.Termius || rc=1
+    else
+        echo "Termius installation not found."
+    fi
+    rm -rf ~/.config/Termius
+    rm -rf ~/.termius
+    return $rc
+}
+
+update_termius() {
+    info "Updating Termius SSH Client..."
+    ensure_tools
+    case "$DISTRO_FAMILY" in
+        debian)
+            local tmp_deb
+            tmp_deb=$(mktemp /tmp/termius-XXXXXX.deb)
+            CLEANUP_FILES+=("$tmp_deb")
+            wget -q "$_TERMIUS_DEB_URL" -O "$tmp_deb"
+            verify_download "$tmp_deb" "deb" "Termius" || return 1
+            pkg_install "$tmp_deb"
+            rm -f "$tmp_deb"
+            ;;
+        arch|fedora|rhel|suse)
+            # The download URL carries no version, so there is nothing to
+            # compare against without fetching the package itself — just
+            # reinstall over the top.
+            #
+            # No marker means this is not a native install yet: on Arch that is
+            # the migration case, where install_termius replaces an AUR
+            # termius-deb (or a snap/Flatpak copy) with the native tree and
+            # warns about whatever is left behind.
+            if [[ -f "$_TERMIUS_VERSION_FILE" ]]; then
+                _termius_install_native || return 1
+            else
+                install_termius
+            fi
+            ;;
+        *)
+            if has_snap && snap list termius-app &>/dev/null; then
+                sudo snap refresh termius-app
+            elif flatpak_is_installed termius; then
+                # Same scope split as uninstall — a system-wide Flatpak cannot
+                # be updated by an unprivileged user.
+                flatpak update -y --user com.termius.Termius 2>/dev/null || \
+                    sudo flatpak update -y --system com.termius.Termius
+            else
+                error "Termius installation not found or no supported update method."
+                return 1
+            fi
+            ;;
+    esac
+}
+
+get_version_termius() {
+    # Do NOT call termius-app --version — the Electron binary reports the
+    # version of its bundled Node runtime, not the Termius release.
+    # -s, not -r: the marker is created even when the version could not be
+    # parsed, so an empty one must fall through to the packaged-install checks.
+    if [[ -s "$_TERMIUS_VERSION_FILE" && -r "$_TERMIUS_VERSION_FILE" ]]; then
+        sed 's/^[0-9]*://; s/-.*//' "$_TERMIUS_VERSION_FILE"
+    elif pkg_check_installed termius-deb; then
+        pkg_get_version termius-deb | sed 's/^[0-9]*://; s/-.*//'
+    elif pkg_check_installed termius; then
+        pkg_get_version termius | sed 's/^[0-9]*://; s/-.*//'
+    elif pkg_check_installed termius-app; then
+        pkg_get_version termius-app | sed 's/^[0-9]*://; s/-.*//'
+    elif _ver_from_snap termius-app; then
+        return
+    elif flatpak_is_installed termius; then
+        _ver_from_flatpak termius
+    else
+        echo ""
+    fi
+}

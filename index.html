@@ -2,11 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Linux_Util Desktop</title>
   </head>
   <body>
-    <main id="app"></main>
+    <div id="app">
+      <header>
+        <h1>Linux_Util Desktop</h1>
+        <span id="distro" class="muted"></span>
+        <span id="count" class="muted"></span>
+        <input id="search" type="search" placeholder="Search utilities" autofocus />
+      </header>
+      <div id="body">
+        <nav id="categories" hidden></nav>
+        <ul id="list"></ul>
+      </div>
+      <p id="status" class="muted">Loading utilities…</p>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
