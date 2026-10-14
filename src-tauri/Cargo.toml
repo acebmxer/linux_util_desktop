@@ -1,0 +1,18 @@
+[package]
+name = "linux_util_desktop"
+version = "0.1.0"
+description = "Desktop front end for linux_util"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "linux_util_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+libc = "0.2"

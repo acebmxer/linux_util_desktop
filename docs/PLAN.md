@@ -3,7 +3,8 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 0 (groundwork) complete. Next: Stage 1.**
+**Current stage: 5 (packaging and release) complete once `v0.1.0` is tagged.
+Next: Stage 6.**
 
 ## Decisions made
 
@@ -59,45 +60,62 @@ Fallback if it does not: run the script inside a PTY and answer the prompt.
 
 ### Stage 1: Skeleton
 Goal: an empty Linux_Util Desktop window that builds and launches.
-- [ ] Scaffold Tauri app (TypeScript, no heavy UI framework unless needed)
-- [ ] Window title, app ID, icon placeholder, desktop entry
-- [ ] `npm run tauri dev` works; document prerequisites for Fedora, Debian, Arch
-- [ ] CI: build on push (Ubuntu runner)
+- [x] Scaffold Tauri app (TypeScript, no heavy UI framework unless needed)
+- [x] Window title, app ID, icon placeholder, desktop entry
+- [x] `npm run tauri dev` works; document prerequisites for Fedora, Debian, Arch
+- [x] CI: build on push (Ubuntu runner)
 
 ### Stage 2: Read-only list
 Goal: see every utility and its install status. Nothing can change the system.
-- [ ] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now)
-- [ ] Rust command runs `--list --json --no-color`, strips the `Detected:` line
-- [ ] UI list with installed badge and version
-- [ ] Search box
-- [ ] Categories (JSON fields exist on linux_util `dev`, unreleased)
-- [ ] Detected distro shown in the header
-- [ ] Light and dark theme following the system
+- [x] Vendor `linux_util.sh` + `lib/` at the latest tag (manual copy for now): v1.9.0
+- [x] Rust command runs `--list --json --no-color`, strips the `Detected:` line
+- [x] UI list with installed badge and version
+- [x] Search box
+- [x] Categories (JSON fields ship in linux_util v1.9.0, now vendored); sub-categories group the list and nest in the sidebar
+- [x] Detected distro shown in the header (read from `/etc/os-release`; v1.8.0 prints no `Detected:` line)
+- [x] Light and dark theme following the system
 
 ### Stage 3: Actions
 Goal: install, uninstall and update from the app.
-- [ ] **Spike:** prove the `sudo -A` shim and askpass dialog end to end on Fedora
-- [ ] Run one action with live output streamed into a log pane
-- [ ] Install, uninstall, update, and the exit-code result
-- [ ] Multi-select and a run queue
-- [ ] Dry-run toggle
-- [ ] Cancel a running action, and block a second concurrent run
-- [ ] Error display and a copy-log button
+- [x] **Spike:** prove the `sudo -A` shim and askpass end to end on Fedora (2026-10-14, Fedora container, non-root user, no TTY, stdin `/dev/null`): `--install` and `--uninstall "Parallel Downloads"` both ran, exit 0; askpass was called once per `sudo` call (no credential cache without a TTY); an askpass that exits 1 makes the action fail with exit 1 and no hang
+- [x] Run one action with live output streamed into a log pane
+- [x] Install, uninstall, update, and the exit-code result (update: same code path, not run)
+- [x] Multi-select and a run queue (queue: one utility at a time; only one-item runs exercised)
+- [x] Dry-run toggle
+- [x] Cancel a running action, and block a second concurrent run (concurrent block: Rust check plus disabled buttons; only the disabled buttons were seen)
+- [x] Error display and a copy-log button (copy button: not clicked in the test)
+
+Built: `src-tauri/src/actions.rs` (run queue, `sudo` shim, askpass over a private
+Unix socket, password checked once with `sudo -S -k -v` and kept in memory for
+one run) and the action bar, log pane and password dialog in the UI. Actions run
+from a per-user copy of the vendored script in the app data directory, because
+`linux_util.sh` writes `logs/` next to itself and the bundled copy can be
+read-only. Dry run still asks for the password (the script refreshes the
+package cache first). Tested in a Fedora 45 container under a virtual display,
+not on a real desktop.
 
 ### Stage 4: Sync and contract
 Goal: keep the bundled script current without surprises.
-- [ ] `scripts/sync_linux_util.sh <tag>` copies a tag into `vendor/` and writes `VERSION`
-- [ ] Contract test checks the bundled script against `docs/CONTRACT.md`
-- [ ] Scheduled CI job opens a PR when a new linux_util tag appears
-- [ ] Test in the linux_util repo or here that guards `--list --json` (decide where)
+- [x] `scripts/sync_linux_util.sh <tag>` copies a tag into `vendor/` and writes `VERSION`
+- [x] Contract test checks the bundled script against `docs/CONTRACT.md` (`npm run contract`, also in the Build workflow)
+- [x] Scheduled CI job opens a PR when a new linux_util tag appears (`sync-linux-util.yml`, daily, PR against `dev`; draft if the contract fails)
+- [x] Test that guards `--list --json`: decided here only, covered by the contract test
 
 ### Stage 5: Packaging and release
 Goal: installable builds on other distros.
-- [ ] AppImage, `.deb`, `.rpm` via Tauri bundler
-- [ ] Declare the WebKitGTK dependency in `.deb` and `.rpm`
-- [ ] Release workflow on tag push, with checksums
-- [ ] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE
-- [ ] First tagged release `v0.1.0`
+- [x] AppImage, `.deb`, `.rpm` via Tauri bundler (built on Ubuntu 22.04, the same as the Release workflow)
+- [x] Declare the WebKitGTK dependency in `.deb` and `.rpm`: Tauri adds WebKitGTK and GTK itself (the `.rpm` by soname, so it resolves on openSUSE too); `bash` and `sudo` added
+- [x] Release workflow on tag push, with checksums (`release.yml`: tag must match the app version, draft release; not yet run on GitHub)
+- [x] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE (`scripts/smoke_test.sh`, also a job in `release.yml`; run locally with podman, all four pass)
+- [ ] First tagged release `v0.1.0` (version set and changelog dated 2026-10-14; the `.rpm` installed and ran an install and uninstall on Fedora 45; tag still to push)
+
+Found while testing: the AppImage's launcher points `LD_LIBRARY_PATH`, `PATH`
+and the GTK/GIO paths into the bundle, so on Arch `curl`, `git` and `pacman`
+run by linux_util.sh crashed with "symbol lookup error". The app now gives
+linux_util.sh the host's environment back and runs it from the home directory
+(`use_host_env` in `lib.rs`); the askpass helper keeps the bundle's library
+path. Checked on Arch: a full Parallel Downloads install from the AppImage,
+password dialog included, succeeded and showed Installed.
 
 ### Stage 6: Polish
 - [ ] Profiles (`--export-profile`, `--import-profile`)
@@ -115,13 +133,14 @@ Goal: installable builds on other distros.
 1. **Run the sudo shim approach?** Confirm in the Stage 3 spike (above).
 2. **Categories.** Decided: (a). `linux_util` `--list --json` now has `category` and
    `subcategory` on each utility (added to the existing `linux_util/list/v1`
-   schema, since the fields are additive). Not yet released in a linux_util tag.
-3. **Test coverage.** Where should the JSON contract test live?
+   schema, since the fields are additive). Released in linux_util v1.9.0.
+3. **Test coverage.** Decided: the contract test lives in this repo only.
 4. **Pinning policy.** One bundled script version per release, with no runtime
    downloads, as assumed in the README.
 5. **Windows/macOS.** Out of scope; linux_util is Linux-only.
 
 ## Prerequisites on the dev machine
 
-Already present: `node`, `npm`, `cargo`, `rustc`. Still to check at Stage 1:
-Tauri's system libraries (WebKitGTK 4.1 dev packages and friends).
+Already present: `node`, `npm`, `cargo`, `rustc`. Tauri's system libraries
+(WebKitGTK 4.1 dev packages) are not installed on the host; Stage 1 was built
+and launched in a Fedora 45 container. Package lists are in the README.

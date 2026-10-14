@@ -1,0 +1,231 @@
+#!/bin/bash
+# GNOME Desktop installer functions
+
+# --- GNOME Desktop ---
+check_gnome() {
+    _have_cmd gnome-shell || \
+        pkg_check_installed gnome-shell || \
+        pkg_check_installed gnome || \
+        pkg_check_installed gnome-desktop
+}
+
+get_version_gnome() {
+    local version=""
+    if _have_cmd gnome-shell; then
+        version=$(_run_native gnome-shell --version 2>/dev/null | grep -oP '[0-9]+\.[0-9.]+' | head -1)
+    fi
+    if [[ -n "$version" ]]; then
+        echo "$version"
+    else
+        local pkg_ver
+        pkg_ver=$(pkg_get_version gnome-shell 2>/dev/null || echo "")
+        echo "$pkg_ver" | sed 's/^[0-9]*://; s/-.*//'
+    fi
+}
+
+install_gnome() {
+    setup_install_gnome
+}
+
+uninstall_gnome() {
+    echo "Uninstalling GNOME Desktop..."
+    case "$DISTRO_FAMILY" in
+        debian)
+            pkg_remove gnome gnome-shell gnome-session gdm3
+            ;;
+        fedora|rhel)
+            sudo "$PKG_MGR" group remove -y @gnome-desktop 2>/dev/null || \
+                sudo "$PKG_MGR" group remove -y 'GNOME Desktop Environment' 2>/dev/null || true
+            sudo "$PKG_MGR" autoremove -y
+            ;;
+        arch)
+            pkg_remove gnome gnome-extra gdm 2>/dev/null || true
+            ;;
+        suse)
+            pkg_remove -t pattern gnome gnome_basis
+            ;;
+    esac
+    rm -rf ~/.config/gnome* ~/.config/dconf ~/.local/share/gnome* 2>/dev/null || true
+    echo "GNOME Desktop uninstalled. You may need to install another desktop environment."
+}
+
+update_gnome() {
+    echo "Updating GNOME Desktop..."
+    case "$DISTRO_FAMILY" in
+        debian)
+            sudo apt update
+            pkg_upgrade gnome gnome-shell
+            ;;
+        fedora|rhel)
+            sudo "$PKG_MGR" group update -y @gnome-desktop 2>/dev/null || \
+                pkg_upgrade gnome-shell gnome-session gdm
+            ;;
+        arch)
+            sudo pacman -Syu --noconfirm gnome gnome-extra
+            ;;
+        suse)
+            pkg_upgrade -t pattern gnome gnome_basis
+            ;;
+    esac
+}
+
+setup_install_gnome() {
+    info "Installing GNOME Desktop..."
+    ensure_tools
+
+    local tier
+    tier=$(_prompt_de_tier "GNOME")
+
+    case "$PKG_MGR" in
+        apt)
+            run_as_root apt-get update
+            case "$tier" in
+                minimal)
+                    info "Installing GNOME (Minimal/Core)..."
+                    run_as_root apt-get install -y gnome-core gdm3 || {
+                        run_as_root apt-get install -y gnome-shell gnome-session \
+                            gnome-terminal nautilus gdm3 || {
+                            error "Failed to install GNOME (Minimal/Core)"
+                            return 1
+                        }
+                    }
+                    ;;
+                full)
+                    info "Installing GNOME (Full Suite)..."
+                    # ubuntu-desktop on Ubuntu; fall back to the gnome task on Debian.
+                    run_as_root apt-get install -y ubuntu-desktop gdm3 || \
+                    run_as_root apt-get install -y gnome gdm3 || {
+                        error "Failed to install GNOME (Full Suite)"
+                        return 1
+                    }
+                    ;;
+                *)
+                    info "Installing GNOME (Standard)..."
+                    run_as_root apt-get install -y gnome gdm3 || {
+                        run_as_root apt-get install -y gnome-shell gnome-session gnome-terminal \
+                            nautilus gdm3 gnome-control-center gnome-tweaks || {
+                            error "Failed to install GNOME (Standard)"
+                            return 1
+                        }
+                    }
+                    ;;
+            esac
+            info "Enabling display manager..."
+            run_as_root systemctl enable gdm3 2>/dev/null || \
+                run_as_root systemctl enable gdm || warn "Failed to enable gdm"
+            run_as_root systemctl set-default graphical.target || warn "Failed to set graphical.target as default"
+            ;;
+
+        dnf|yum)
+            case "$tier" in
+                minimal)
+                    info "Installing GNOME (Minimal/Core)..."
+                    # RHEL 10 dropped GNOME Terminal in favour of Ptyxis.
+                    local _gnome_terminal=gnome-terminal
+                    [[ "$DISTRO_FAMILY" == "rhel" && "${DISTRO_VERSION_ID%%.*}" -ge 10 ]] && _gnome_terminal=ptyxis
+                    run_as_root "$PKG_MGR" install -y gnome-shell gnome-session gdm \
+                        "$_gnome_terminal" nautilus gnome-control-center \
+                        xdg-desktop-portal-gnome || {
+                        error "Failed to install GNOME (Minimal/Core)"
+                        return 1
+                    }
+                    ;;
+                full)
+                    info "Installing GNOME (Full Suite)..."
+                    if ! run_as_root "$PKG_MGR" group install -y 'GNOME Desktop Environment' 2>/dev/null && \
+                       ! run_as_root "$PKG_MGR" group install -y @gnome-desktop 2>/dev/null; then
+                        run_as_root "$PKG_MGR" install -y gnome-shell gnome-session gdm \
+                            gnome-terminal nautilus gnome-control-center gnome-tweaks \
+                            gnome-software gnome-text-editor xdg-desktop-portal-gnome || {
+                            error "Failed to install GNOME (Full Suite) packages"
+                            return 1
+                        }
+                    fi
+                    # Default GNOME applications (best-effort).
+                    run_as_root "$PKG_MGR" install -y gnome-tweaks gnome-extensions-app \
+                        gnome-boxes gnome-calculator gnome-calendar gnome-weather \
+                        gnome-maps gnome-photos gnome-music gnome-contacts 2>/dev/null || true
+                    ;;
+                *)
+                    info "Installing GNOME (Standard)..."
+                    if ! run_as_root "$PKG_MGR" group install -y 'GNOME Desktop Environment' 2>/dev/null && \
+                       ! run_as_root "$PKG_MGR" group install -y @gnome-desktop 2>/dev/null; then
+                        info "Group install not available, installing GNOME packages individually..."
+                        run_as_root "$PKG_MGR" install -y gnome-shell gnome-session gdm \
+                            gnome-terminal nautilus gnome-control-center gnome-tweaks \
+                            gnome-software gnome-text-editor xdg-desktop-portal-gnome || {
+                            error "Failed to install GNOME (Standard) packages"
+                            return 1
+                        }
+                    fi
+                    ;;
+            esac
+            _enable_desktop_login gdm
+            ;;
+
+        zypper)
+            case "$tier" in
+                minimal)
+                    info "Installing GNOME (Minimal/Core)..."
+                    run_as_root zypper install -y -t pattern gnome_basis || {
+                        error "Failed to install GNOME (Minimal/Core)"
+                        return 1
+                    }
+                    ;;
+                full)
+                    info "Installing GNOME (Full Suite)..."
+                    run_as_root zypper install -y -t pattern gnome gnome_basis gnome_utilities \
+                        gnome_imaging gnome_multimedia gnome_admin gnome_games gnome_office || {
+                        error "Failed to install GNOME (Full Suite)"
+                        return 1
+                    }
+                    ;;
+                *)
+                    info "Installing GNOME (Standard)..."
+                    run_as_root zypper install -y -t pattern gnome gnome_basis gnome_utilities \
+                        gnome_imaging gnome_multimedia gnome_admin || {
+                        error "Failed to install GNOME (Standard)"
+                        return 1
+                    }
+                    ;;
+            esac
+            _enable_desktop_login gdm
+            ;;
+
+        pacman)
+            case "$tier" in
+                minimal)
+                    info "Installing GNOME (Minimal/Core)..."
+                    run_as_root pacman -S --noconfirm gnome-shell gnome-session \
+                        gnome-control-center gnome-terminal nautilus gdm || {
+                        error "Failed to install GNOME (Minimal/Core)"
+                        return 1
+                    }
+                    ;;
+                full)
+                    info "Installing GNOME (Full Suite)..."
+                    run_as_root pacman -S --noconfirm gnome gnome-extra gdm || {
+                        error "Failed to install GNOME (Full Suite)"
+                        return 1
+                    }
+                    ;;
+                *)
+                    info "Installing GNOME (Standard)..."
+                    run_as_root pacman -S --noconfirm gnome gdm || {
+                        error "Failed to install GNOME (Standard)"
+                        return 1
+                    }
+                    ;;
+            esac
+            _enable_desktop_login gdm
+            ;;
+
+        *)
+            error "GNOME installation not fully supported for ${DISTRO_ID}"
+            return 1
+            ;;
+    esac
+
+    info "GNOME Desktop installed successfully. Reboot to start using GNOME."
+    return 0
+}

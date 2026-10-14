@@ -1,0 +1,113 @@
+name: Sync linux_util
+
+# Opens a PR against dev when linux_util has a newer release tag than the one
+# in vendor/linux_util.VERSION. The contract test runs here, because PRs opened
+# with GITHUB_TOKEN do not trigger the Build workflow. A failing contract opens
+# the PR as a draft with the failures in its description, and this run fails.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-linux-util
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/acebmxer/linux_util.git
+  BASE: dev
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE }}
+
+      - name: Find newer linux_util tag
+        id: tag
+        run: |
+          latest=$(git ls-remote --tags --refs "$UPSTREAM" 'v*' \
+            | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          current=$(cat vendor/linux_util.VERSION)
+          echo "Bundled: $current  Latest: $latest"
+          if [[ -z "$latest" || "$latest" == "$current" ]] \
+             || [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" != "$latest" ]]; then
+            echo "Nothing newer to sync."
+            exit 0
+          fi
+          branch="sync/linux_util-$latest"
+          if [[ -n "$(git ls-remote --heads origin "$branch")" ]]; then
+            echo "Branch $branch already exists; leaving it alone."
+            exit 0
+          fi
+          {
+            echo "tag=$latest"
+            echo "current=$current"
+            echo "branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: steps.tag.outputs.tag
+        with:
+          node-version: 22
+
+      - name: Vendor the new tag
+        if: steps.tag.outputs.tag
+        run: scripts/sync_linux_util.sh "${{ steps.tag.outputs.tag }}"
+
+      - name: Contract test
+        id: contract
+        if: steps.tag.outputs.tag
+        run: |
+          set +e
+          npm run --silent contract > contract.txt 2>&1
+          rc=$?
+          cat contract.txt
+          echo "passed=$([[ $rc -eq 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        if: steps.tag.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          CURRENT: ${{ steps.tag.outputs.current }}
+          BRANCH: ${{ steps.tag.outputs.branch }}
+          PASSED: ${{ steps.contract.outputs.passed }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898229+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add vendor
+          git commit -m "chore: vendor linux_util $TAG"
+          git push origin "$BRANCH"
+
+          {
+            echo "Updates the bundled linux_util from $CURRENT to $TAG."
+            echo
+            echo "Upstream changes: https://github.com/acebmxer/linux_util/compare/$CURRENT...$TAG"
+            echo
+            if [[ "$PASSED" == true ]]; then
+              echo "Contract test (docs/CONTRACT.md): **passed**."
+            else
+              echo "Contract test (docs/CONTRACT.md): **failed**. The app needs updating before this can merge."
+            fi
+            echo
+            echo '```'
+            cat contract.txt
+            echo '```'
+          } > body.md
+
+          draft=()
+          [[ "$PASSED" == true ]] || draft=(--draft)
+          gh pr create --base "$BASE" --head "$BRANCH" "${draft[@]}" \
+            --title "Vendor linux_util $TAG" --body-file body.md
+
+      - name: Fail on broken contract
+        if: steps.tag.outputs.tag && steps.contract.outputs.passed != 'true'
+        run: exit 1

@@ -1,8 +1,9 @@
 # CLI contract
 
 What Linux_Util Desktop relies on from `linux_util.sh`. If a linux_util release
-changes any of this, the contract test (Stage 4) fails and the sync PR is
-blocked until the app is updated.
+changes any of this, the contract test (`npm run contract`,
+`scripts/contract_test.mjs`) fails and the sync PR is opened as a draft until
+the app is updated.
 
 ## Flags used
 
@@ -11,7 +12,8 @@ blocked until the app is updated.
 
 ## `--list --json`
 
-Observed against linux_util v1.8.0:
+Observed against linux_util v1.8.0 (shape unchanged in v1.9.0, plus the
+category fields below):
 
 ```json
 {
@@ -24,18 +26,23 @@ Observed against linux_util v1.8.0:
 ```
 
 Relied on: `schema` equals `linux_util/list/v1`; `utilities[]` entries have
-`name` (string), `installed` (bool) and `version` (string or null).
+`name` (non-empty string, unique), `installed` (bool) and `version` (string or null).
 
 Notes:
-- The command prints a `Detected: ...` line **before** the JSON on stdout. The
-  app must strip everything before the first `{` or ask linux_util to drop it.
+- v1.8.0 prints only a blank line before the JSON. The app drops everything
+  before the first `{` in case a `Detected: ...` line is added.
+- The script creates `logs/` next to itself on every run, including `--list`.
+  It still exits 0 when that directory is read-only, but prints errors to stderr.
 - Each utility has `category` and `subcategory` (strings, `null` when absent; system tasks are category "System Tasks").
 
 ## Exit codes and output
 
 Install, uninstall and update run to completion and exit non-zero on failure.
-The app shows stdout and stderr live and reports the exit code. To be confirmed
-and recorded here in Stage 3.
+The app shows stdout and stderr live and reports the exit code. Confirmed in
+Stage 3 against v1.9.0: exit 0 on success, 1 on failure (including a refused
+`sudo` password); cancelling ends the script by signal, so it has no exit code. `--dry-run` goes before
+the action flag and still asks for `sudo` once (package cache refresh). The
+script writes `logs/` next to itself, so the app runs a per-user copy.
 
 ## Privileges
 

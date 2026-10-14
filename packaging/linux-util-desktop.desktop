@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Linux_Util Desktop
+Comment=Install and manage Linux utilities
+Exec=linux_util_desktop
+Icon=linux_util_desktop
+Terminal=false
+Categories=System;Settings;

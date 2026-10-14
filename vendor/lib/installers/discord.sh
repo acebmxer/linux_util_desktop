@@ -1,0 +1,96 @@
+#!/bin/bash
+# Discord installer functions
+
+# --- Discord ---
+
+check_discord() { _check_standard discord discord com.discordapp.Discord; }
+
+install_discord() {
+    info "Installing Discord..."
+    ensure_tools
+    case "$DISTRO_FAMILY" in
+        debian)
+            local tmpfile
+            tmpfile=$(mktemp /tmp/discord-XXXXXX.deb)
+            CLEANUP_FILES+=("$tmpfile")
+            if ! wget -qO "$tmpfile" "https://discord.com/api/download?platform=linux&format=deb"; then
+                error "Failed to download Discord .deb package."
+                return 1
+            fi
+            verify_download "$tmpfile" "deb" "Discord" || return 1
+            pkg_install "$tmpfile"
+            ;;
+        fedora|rhel)
+            if has_flatpak; then
+                sudo flatpak install -y flathub com.discordapp.Discord
+            else
+                local tmpfile
+                tmpfile=$(mktemp /tmp/discord-XXXXXX.tar.gz)
+                CLEANUP_FILES+=("$tmpfile")
+                wget -qO "$tmpfile" "https://discord.com/api/download?platform=linux&format=tar.gz" || {
+                    error "Failed to download Discord archive."
+                    return 1
+                }
+                verify_download "$tmpfile" "tar.gz" "Discord" || return 1
+                sudo mkdir -p /opt/discord
+                sudo tar -xzf "$tmpfile" -C /opt/discord --strip-components=1
+                sudo ln -sf /opt/discord/Discord /usr/local/bin/discord
+                # Install desktop entry
+                sudo cp /opt/discord/discord.desktop /usr/share/applications/ 2>/dev/null || true
+            fi
+            ;;
+        arch)
+            pkg_install discord
+            ;;
+        suse)
+            if has_flatpak; then
+                sudo flatpak install -y flathub com.discordapp.Discord
+            else
+                error "Discord requires Flatpak on openSUSE. Install Flatpak first."
+                return 1
+            fi
+            ;;
+    esac
+    info "Discord installed."
+}
+
+uninstall_discord() {
+    info "Uninstalling Discord..."
+    if flatpak_is_installed "com.discordapp.Discord"; then
+        flatpak uninstall -y --user com.discordapp.Discord 2>/dev/null || \
+            sudo flatpak uninstall -y --system com.discordapp.Discord
+    else
+        case "$DISTRO_FAMILY" in
+            debian)
+                pkg_remove discord
+                ;;
+            fedora|rhel)
+                sudo rm -f /usr/local/bin/discord
+                sudo rm -rf /opt/discord
+                sudo rm -f /usr/share/applications/discord.desktop
+                ;;
+            arch)
+                pkg_remove discord
+                ;;
+        esac
+    fi
+    rm -rf "$HOME/.config/discord"
+}
+
+update_discord() {
+    info "Updating Discord..."
+    if flatpak_is_installed "com.discordapp.Discord"; then
+        flatpak update -y --user com.discordapp.Discord 2>/dev/null || \
+            sudo flatpak update -y --system com.discordapp.Discord
+    else
+        case "$DISTRO_FAMILY" in
+            debian)       install_discord ;;
+            fedora|rhel)  install_discord ;;
+            arch)         pkg_upgrade discord ;;
+        esac
+    fi
+}
+
+get_version_discord() {
+    _ver_from_flatpak com.discordapp.Discord || _ver_from_pkg discord || echo ""
+}
