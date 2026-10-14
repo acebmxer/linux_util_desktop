@@ -11,6 +11,13 @@ release is cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **System Updates with nothing to update** showed as failed (exit 1).
+  linux_util's `--install` turns its "success, no changes" result into exit 1,
+  so a run that ends with "No package changes were made." now counts as
+  succeeded, and does not offer a reboot.
+
 ### Added
 
 - **Beta updates**: the Release workflow can now be started by hand on `dev`
@@ -30,6 +37,10 @@ release is cut.
 - **Reboot prompt**: when a run finishes and the system has flagged a pending
   reboot, a "Reboot needed" dialog offers **Reboot now** or **Later**, as
   linux_util's own menu does.
+
+  It also appears after any successful System Task, Docker or Drivers item,
+  except the ones the menu skips (such as Parallel Downloads), so System
+  Updates prompts as it does in the menu.
 
 ### Removed
 

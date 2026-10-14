@@ -46,6 +46,28 @@ function isTask(u: Utility): boolean {
   return u.category === TASKS;
 }
 
+// linux_util's menu offers a reboot after any successful System Task, Docker or
+// Drivers item except these (its NO_REBOOT list in linux_util.sh). Keep in step.
+const NO_REBOOT = new Set([
+  "Create Snapshot",
+  "Restore Snapshot",
+  "Delete Snapshot",
+  "Local Time Zone / Locale",
+  "Mount Local Drive",
+  "Mount NFS Share",
+  "Mount SMB Share",
+  "Manage Share",
+  "Configure Syncthing Folders",
+  "Parallel Downloads",
+]);
+let rebootItems = new Set<string>();
+
+function rebootsAfter(name: string): boolean {
+  if (NO_REBOOT.has(name)) return false;
+  const u = utilities.find((x) => x.name === name);
+  return name === "Docker" || (u !== undefined && (isTask(u) || u.category === "Drivers"));
+}
+
 // System tasks change a setting rather than add software, so they are applied
 // and reverted instead of installed and uninstalled.
 const OP_WORDS: Record<Op, [string, string]> = {
@@ -339,6 +361,7 @@ async function launch(op: Op, names: string[], title: string) {
 // Shows the run panel with one queue entry per name, then starts the run.
 async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
   logText = "";
+  rebootItems = new Set();
   partialLines.clear();
   logEl().replaceChildren();
   $("runtitle").textContent = title;
@@ -437,7 +460,10 @@ listen<{ index: number; name: string; state: string; code: number | null }>("run
     li.textContent = state === "failed" && code !== null ? `${name} (exit ${code})` : name;
   }
   if (state === "running") appendLog(`--- ${name} ---`);
-  else if (state === "ok") appendLog(`--- ${name}: finished ---`);
+  else if (state === "ok") {
+    if (code !== 3 && rebootsAfter(name)) rebootItems.add(name);
+    appendLog(`--- ${name}: finished ---`);
+  }
   else if (state === "failed") appendLog(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, true);
   else appendLog(`--- ${name}: cancelled ---`);
 });
@@ -465,13 +491,15 @@ listen<{ ok: number; failed: number; cancelled: boolean }>("run-done", (ev) => {
   if (ok > 0 && !cancelled) offerReboot();
 });
 
-// Same offer linux_util's menu makes at the end of a run, when the system says
-// a reboot is pending.
+// Same offer linux_util's menu makes at the end of a run: after a System Task,
+// Docker or Drivers item, or when the system says a reboot is pending.
 async function offerReboot() {
-  try {
-    if (!(await invoke<boolean>("reboot_needed"))) return;
-  } catch {
-    return;
+  if (rebootItems.size === 0) {
+    try {
+      if (!(await invoke<boolean>("reboot_needed"))) return;
+    } catch {
+      return;
+    }
   }
   $("rebooterr").textContent = "";
   const dialog = $<HTMLDialogElement>("reboot");

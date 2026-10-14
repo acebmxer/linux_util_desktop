@@ -376,6 +376,11 @@ pub(crate) fn clean_line(raw: &[u8]) -> String {
     out
 }
 
+/// linux_util's `System Updates` ends with this line when nothing changed. It
+/// returns 3 ("success, no changes"), but `--install` turns every non-zero
+/// code into exit 1, so the line is how the app tells that case from a failure.
+const NO_CHANGES_LINE: &str = "No package changes were made.";
+
 /// Sends `reader`'s output to the UI a line at a time. Text left after the
 /// last newline is also sent, as a partial line, so a prompt that waits for an
 /// answer without ending its line is visible before the answer is typed.
@@ -384,6 +389,7 @@ fn pump<R: Read + Send + 'static>(
     mut reader: R,
     stderr: bool,
     pending: Arc<Mutex<Vec<u8>>>,
+    no_changes: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -399,6 +405,9 @@ fn pump<R: Read + Send + 'static>(
             while let Some(end) = pending.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = pending.drain(..=end).collect();
                 let text = clean_line(&line);
+                if text.contains(NO_CHANGES_LINE) {
+                    no_changes.store(true, Ordering::SeqCst);
+                }
                 let _ = app.emit("run-output", Output { text: &text, stderr, partial: false });
             }
             if !pending.is_empty() {
@@ -500,9 +509,10 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             inner.pending = pending.to_vec();
         }
         let [out_pending, err_pending] = pending;
+        let no_changes = Arc::new(AtomicBool::new(false));
         let readers = [
-            pump(app.clone(), child.stdout.take().unwrap(), false, out_pending),
-            pump(app.clone(), child.stderr.take().unwrap(), true, err_pending),
+            pump(app.clone(), child.stdout.take().unwrap(), false, out_pending, no_changes.clone()),
+            pump(app.clone(), child.stderr.take().unwrap(), true, err_pending, no_changes.clone()),
         ];
         let status = child.wait();
         {
@@ -518,10 +528,13 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             inner.pid = None;
             inner.cancelled
         };
-        let code = status.as_ref().ok().and_then(|s| s.code());
+        let mut code = status.as_ref().ok().and_then(|s| s.code());
+        if code == Some(1) && no_changes.load(Ordering::SeqCst) {
+            code = Some(3);
+        }
         let item_state = if cancelled {
             "cancelled"
-        } else if code == Some(0) {
+        } else if matches!(code, Some(0 | 3)) {
             ok += 1;
             "ok"
         } else {
