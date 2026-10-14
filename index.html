@@ -19,6 +19,11 @@
           <input id="search" type="search" placeholder="Search utilities (/)" aria-label="Search utilities" autofocus />
         </div>
       </header>
+      <div id="updatebar" role="status" hidden>
+        <span id="updatetext"></span>
+        <button id="updateview" type="button" class="primary">See what's new</button>
+        <button id="updatedismiss" type="button">Dismiss</button>
+      </div>
       <div id="body">
         <nav id="categories" aria-label="Categories" hidden></nav>
         <ul id="list" aria-label="Utilities"></ul>
@@ -48,6 +53,12 @@
         <button id="do-updateall" type="button">Update all</button>
       </div>
       <p id="status" class="muted" role="status">Loading utilities…</p>
+      <footer id="versions" class="muted">
+        <span id="versiontext"></span>
+        <span class="spacer"></span>
+        <span id="updatemsg" role="status"></span>
+        <button id="checkupdate" type="button" class="link">Check for updates</button>
+      </footer>
       <dialog id="askpass" aria-labelledby="asktitle">
         <form method="dialog" id="askform">
           <h2 id="asktitle">Administrator password</h2>
@@ -59,6 +70,16 @@
             <button id="askok" type="submit" class="primary">Authenticate</button>
           </div>
         </form>
+      </dialog>
+      <dialog id="update" aria-labelledby="updatetitle">
+        <h2 id="updatetitle"></h2>
+        <p id="updatehow" class="muted"></p>
+        <pre id="updatenotes" tabindex="0" aria-label="What changed"></pre>
+        <p id="updatepage" class="muted"></p>
+        <div class="buttons">
+          <button id="updateclose" type="button">Close</button>
+          <button id="updateinstall" type="button" class="primary">Install update</button>
+        </div>
       </dialog>
       <dialog id="profiles" aria-labelledby="profilestitle">
         <h2 id="profilestitle">Profiles</h2>
@@ -103,6 +124,16 @@
                 <option value="light">Light</option>
                 <option value="dark">Dark</option>
               </select>
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>Updates</legend>
+            <label class="check">
+              <input id="checkupdates" type="checkbox" />
+              <span>
+                Check for a newer version when the app starts
+                <small class="muted">Looks at this project's releases on GitHub. Nothing is downloaded until you click Install update.</small>
+              </span>
             </label>
           </fieldset>
           <fieldset>

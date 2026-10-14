@@ -2,6 +2,7 @@ mod actions;
 mod logs;
 mod profiles;
 mod settings;
+mod update;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -162,7 +163,10 @@ pub fn run() {
             settings::get_settings,
             settings::save_settings,
             logs::list_logs,
-            logs::read_log
+            logs::read_log,
+            update::version_info,
+            update::check_update,
+            update::install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running Linux_Util Desktop");

@@ -83,7 +83,7 @@ pub fn askpass_client() -> ! {
     std::process::exit(if code.is_some() { 0 } else { 1 });
 }
 
-fn find_in_path(program: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_path(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&crate::host_var("PATH")?)
         .map(|d| d.join(program))
         .find(|p| p.is_file())
@@ -321,7 +321,31 @@ fn pump<R: Read + Send + 'static>(app: AppHandle, reader: R, stderr: bool) -> st
     })
 }
 
-fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run: bool) {
+/// Tells the UI a line of output. `stderr` lines show in the error colour.
+pub(crate) fn emit_output(app: &AppHandle, text: &str, stderr: bool) {
+    let _ = app.emit("run-output", Output { text, stderr });
+}
+
+/// Tells the UI the state of queue entry `index`.
+pub(crate) fn emit_item(app: &AppHandle, index: usize, name: &str, state: &str, code: Option<i32>) {
+    let _ = app.emit("run-item", ItemEvent { index, name, state, code });
+}
+
+/// Ends the run in the UI.
+pub(crate) fn emit_done(app: &AppHandle, ok: usize, failed: usize, cancelled: bool) {
+    let _ = app.emit("run-done", Done { ok, failed, cancelled });
+}
+
+/// True once the user pressed Cancel during the current run.
+pub(crate) fn is_cancelled(app: &AppHandle) -> bool {
+    app.state::<RunState>().inner.lock().unwrap().cancelled
+}
+
+/// Runs the commands `make` builds, one per name, with a `sudo` that asks the
+/// password through the app's own dialog. Emits the run events, including the
+/// final `run-done`. `make` returns the command before the environment for
+/// the shim is added.
+pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -> Command) {
     let state = app.state::<RunState>();
     let (mut ok, mut failed) = (0, 0);
 
@@ -332,8 +356,8 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
     let (real_sudo, work) = match setup {
         Ok(v) => v,
         Err(e) => {
-            let _ = app.emit("run-output", Output { text: &e, stderr: true });
-            let _ = app.emit("run-done", Done { ok: 0, failed: names.len(), cancelled: false });
+            emit_output(app, &e, true);
+            emit_done(app, 0, names.len(), false);
             return;
         }
     };
@@ -355,14 +379,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
             continue;
         }
         let _ = app.emit("run-item", ItemEvent { index, name, state: "running", code: None });
-        let mut cmd = crate::script_command(app, script);
-        if dry_run {
-            cmd.arg("--dry-run");
-        }
-        cmd.args(["--no-color", &format!("--{op}")]);
-        if op != "update-all" {
-            cmd.arg(name);
-        }
+        let mut cmd = make(name);
         cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
@@ -373,7 +390,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let msg = format!("Could not start linux_util.sh: {e}");
+                let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
                 let _ = app.emit("run-output", Output { text: &msg, stderr: true });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
@@ -434,6 +451,28 @@ pub fn run_action(
         return Err("Nothing selected".to_string());
     }
     let script = staged_script(&app, &crate::script_path(&app)?)?;
+    spawn_run(&app, &state, move |app| {
+        run_queue(app, &names, &|name| {
+            let mut cmd = crate::script_command(app, &script);
+            if dry_run {
+                cmd.arg("--dry-run");
+            }
+            cmd.args(["--no-color", &format!("--{op}")]);
+            if op != "update-all" {
+                cmd.arg(name);
+            }
+            cmd
+        });
+    })
+}
+
+/// Marks a run as started and does `work` on a thread; fails when another run
+/// is going. `work` must end the run in the UI with `run-done`.
+pub(crate) fn spawn_run(
+    app: &AppHandle,
+    state: &State<'_, RunState>,
+    work: impl FnOnce(&AppHandle) + Send + 'static,
+) -> Result<(), String> {
     {
         let mut inner = state.inner.lock().unwrap();
         if inner.running {
@@ -441,8 +480,9 @@ pub fn run_action(
         }
         *inner = Inner { running: true, ..Inner::default() };
     }
+    let app = app.clone();
     std::thread::spawn(move || {
-        run_queue(&app, &script, &op, &names, dry_run);
+        work(&app);
         app.state::<RunState>().inner.lock().unwrap().running = false;
     });
     Ok(())

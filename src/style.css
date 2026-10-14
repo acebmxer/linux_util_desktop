@@ -319,3 +319,46 @@ select {
 #keys { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
 #keys dt { font-family: ui-monospace, monospace; }
 #keys dd { margin: 0; }
+
+#updatebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+#updatebar[hidden] { display: none; }
+#updatetext { flex: 1; }
+#updatebar button { border-color: var(--accent-text); background: transparent; color: inherit; }
+#updatebar button.primary { background: var(--accent-text); color: var(--accent); }
+
+#versions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+#updatemsg.error { color: #dc2626; }
+#versions button { font-size: 12px; }
+
+#update { width: 560px; max-height: 85vh; }
+#update[open] { display: flex; flex-direction: column; }
+#update > * { flex-shrink: 0; }
+#updatenotes {
+  flex: 1 1 auto;
+  min-height: 4em;
+  max-height: 40vh;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#updatepage { margin: 0 0 8px; font-size: 12px; word-break: break-all; }

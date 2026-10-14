@@ -23,6 +23,8 @@ let selectedSub: string | null = null;
 let query = "";
 const picked = new Set<string>();
 let running = false;
+// True while the run in the panel is an update of the app itself.
+let updating = false;
 // The row that keeps keyboard focus in the list (one tab stop for the whole list).
 let cursor: string | null = null;
 type Op = "install" | "uninstall" | "update";
@@ -281,9 +283,14 @@ async function startUpdateAll() {
 
 async function launch(op: Op | "update-all", names: string[], title: string) {
   const dryRun = $<HTMLInputElement>("dryrun").checked;
+  await openRun(`${title}${dryRun ? " (dry run)" : ""}`, names, () => invoke("run_action", { op, names, dryRun }));
+}
+
+// Shows the run panel with one queue entry per name, then starts the run.
+async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
   logText = "";
   logEl().replaceChildren();
-  $("runtitle").textContent = `${title}${dryRun ? " (dry run)" : ""}`;
+  $("runtitle").textContent = title;
   $("runsummary").textContent = "";
   $("queue").replaceChildren(
     ...names.map((n) => {
@@ -295,7 +302,7 @@ async function launch(op: Op | "update-all", names: string[], title: string) {
   $("runpanel").hidden = false;
   setRunning(true);
   try {
-    await invoke("run_action", { op, names, dryRun });
+    await begin();
   } catch (e) {
     appendLog(String(e), true);
     setRunning(false);
@@ -379,6 +386,8 @@ listen<{ ok: number; failed: number; cancelled: boolean }>("run-done", (ev) => {
   if (dialog.open) dialog.close();
   const parts = [`${ok} succeeded`, `${failed} failed`];
   if (cancelled) parts.push("cancelled");
+  if (updating && ok > 0 && failed === 0 && !cancelled) parts.push("restart the app to use the new version");
+  updating = false;
   $("runsummary").textContent = parts.join(", ");
   picked.clear();
   $("selnote").textContent = "";
@@ -600,6 +609,7 @@ type Theme = "system" | "light" | "dark";
 
 interface Settings {
   theme: Theme;
+  check_updates: boolean;
   linux_util: Record<string, string>;
 }
 
@@ -620,7 +630,7 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
   { key: "max_logs_per_day", label: "Most logs kept per day", help: "The oldest of a day's logs beyond this are deleted.", kind: "int", def: "15" },
 ];
 
-let settings: Settings = { theme: "system", linux_util: {} };
+let settings: Settings = { theme: "system", check_updates: true, linux_util: {} };
 
 function applyTheme(theme: Theme) {
   if (theme === "system") delete document.documentElement.dataset.theme;
@@ -629,6 +639,7 @@ function applyTheme(theme: Theme) {
 
 function fillSettings(s: Settings) {
   $<HTMLSelectElement>("theme").value = s.theme;
+  $<HTMLInputElement>("checkupdates").checked = s.check_updates;
   const fields = LU_FIELDS.map((f) => {
     const value = s.linux_util[f.key] ?? f.def;
     const label = document.createElement("label");
@@ -667,7 +678,11 @@ function readSettings(): Settings {
     const value = f.kind === "bool" ? String(input.checked) : input.value.trim();
     if (value !== f.def) linux_util[f.key] = value;
   }
-  return { theme: $<HTMLSelectElement>("theme").value as Theme, linux_util };
+  return {
+    theme: $<HTMLSelectElement>("theme").value as Theme,
+    check_updates: $<HTMLInputElement>("checkupdates").checked,
+    linux_util,
+  };
 }
 
 $("opensettings").addEventListener("click", () => {
@@ -675,7 +690,7 @@ $("opensettings").addEventListener("click", () => {
   fillSettings(settings);
   $<HTMLDialogElement>("settings").showModal();
 });
-$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", linux_util: {} }));
+$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, linux_util: {} }));
 $("settingscancel").addEventListener("click", () => $<HTMLDialogElement>("settings").close());
 $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -689,6 +704,87 @@ $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
     $("settingserr").textContent = String(e);
   }
 });
+
+// ---- version and updates ----
+
+interface VersionInfo {
+  app: string;
+  linux_util: string | null;
+}
+
+interface Update {
+  version: string;
+  notes: string;
+  page: string;
+  can_install: boolean;
+  note: string;
+}
+
+let update: Update | null = null;
+
+function showVersions(v: VersionInfo) {
+  const parts = [`Linux_Util Desktop ${v.app}`];
+  parts.push(v.linux_util ? `bundled linux_util ${v.linux_util}` : "bundled linux_util: version unknown");
+  $("versiontext").textContent = parts.join(" · ");
+}
+
+function updateMessage(text: string, isError = false) {
+  const el = $("updatemsg");
+  el.textContent = text;
+  el.className = isError ? "error" : "";
+}
+
+// Looks for a newer release. At launch a failure stays quiet (no network is
+// normal); from the button it is shown.
+async function checkUpdate(manual: boolean) {
+  const button = $<HTMLButtonElement>("checkupdate");
+  button.disabled = true;
+  if (manual) updateMessage("Checking…");
+  try {
+    update = await invoke<Update | null>("check_update");
+    if (!update) {
+      updateMessage(manual ? "Up to date" : "");
+      return;
+    }
+    updateMessage("");
+    $("updatetext").textContent = `Version ${update.version} is available.`;
+    $("updatebar").hidden = false;
+  } catch (e) {
+    updateMessage(manual ? String(e) : "", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openUpdate() {
+  if (!update) return;
+  $("updatetitle").textContent = `Linux_Util Desktop ${update.version}`;
+  $("updatehow").textContent = update.note;
+  $("updatenotes").textContent = update.notes.trim() || "No release notes.";
+  $("updatepage").textContent = update.page;
+  $<HTMLButtonElement>("updateinstall").hidden = !update.can_install;
+  $<HTMLButtonElement>("updateinstall").disabled = running;
+  $<HTMLDialogElement>("update").showModal();
+}
+
+$("checkupdate").addEventListener("click", () => checkUpdate(true));
+$("updateview").addEventListener("click", openUpdate);
+$("updatedismiss").addEventListener("click", () => ($("updatebar").hidden = true));
+$("updateclose").addEventListener("click", () => $<HTMLDialogElement>("update").close());
+$("updateinstall").addEventListener("click", async () => {
+  if (!update || running) return;
+  const { version } = update;
+  $<HTMLDialogElement>("update").close();
+  $("updatebar").hidden = true;
+  updating = true;
+  await openRun("Update Linux_Util Desktop", [`Linux_Util Desktop ${version}`], () =>
+    invoke("install_update", { version }),
+  );
+  // openRun shows a start error in the panel and ends the run itself.
+  if (!running) updating = false;
+});
+
+invoke<VersionInfo>("version_info").then(showVersions);
 
 // ---- keyboard ----
 
@@ -805,6 +901,7 @@ $<HTMLInputElement>("search").addEventListener("input", (ev) => {
 invoke<Settings>("get_settings").then((s) => {
   settings = s;
   applyTheme(s.theme);
+  if (s.check_updates) checkUpdate(false);
 });
 invoke<string | null>("detected_distro").then((d) => {
   if (!d) return;

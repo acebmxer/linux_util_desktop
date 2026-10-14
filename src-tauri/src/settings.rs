@@ -34,6 +34,9 @@ enum Kind {
 pub struct Settings {
     #[serde(default = "default_theme")]
     theme: String,
+    /// Look for a newer release of the app on launch.
+    #[serde(default = "default_true")]
+    check_updates: bool,
     /// linux_util config keys changed from their defaults.
     #[serde(default)]
     linux_util: BTreeMap<String, String>,
@@ -43,9 +46,13 @@ fn default_theme() -> String {
     "system".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: default_theme(), linux_util: BTreeMap::new() }
+        Settings { theme: default_theme(), check_updates: true, linux_util: BTreeMap::new() }
     }
 }
 
@@ -137,6 +144,7 @@ mod tests {
     fn with(pairs: &[(&str, &str)]) -> Settings {
         Settings {
             theme: "dark".into(),
+            check_updates: true,
             linux_util: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         }
     }
@@ -155,6 +163,13 @@ mod tests {
         let mut s = Settings::default();
         s.theme = "blue".into();
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn older_settings_files_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"theme": "dark", "linux_util": {}}"#).unwrap();
+        assert!(s.check_updates);
+        assert!(s.validate().is_ok());
     }
 
     #[test]

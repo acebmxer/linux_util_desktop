@@ -54,6 +54,17 @@ options that affect the app's runs: answering yes to installer questions
 long logs are kept. They are saved in the app's config folder
 (`~/.config/io.github.acebmxer.linux-util-desktop/`).
 
+The window's bottom line shows the app version and the bundled linux_util
+version. On launch the app looks at this project's latest GitHub release and, if
+it is newer, shows a bar with the release notes and an **Install update**
+button (turn the launch check off in Settings; **Check for updates** checks on
+demand). Nothing is downloaded until you click. The matching file is checked
+against the release's `SHA256SUMS` first, then a `.deb` or `.rpm` is installed
+with apt-get, dnf or zypper through the same password dialog as the other
+actions, or an AppImage file is replaced in place. Restart the app afterwards.
+A copy that was not installed from a release file (a source checkout) only
+shows the notice.
+
 Keyboard, following linux_util's terminal menu: `/` search, `Esc` clear the
 search, `↑` `↓` `Home` `End` move through the list, `Space` select, `←` `→`
 previous or next category, `A` select all shown, `D` deselect all.

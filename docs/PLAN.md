@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 6 (polish) complete. Next: Stage 7 (version and updates).**
+**Current stage: 7 (version and updates) complete. All planned stages are done.**
 
 ## Decisions made
 
@@ -127,9 +127,11 @@ All of Stage 6 tested in an Ubuntu 22.04 container under a virtual display, not 
 
 ### Stage 7: Version and updates
 Goal: see which version is running, and get a newer release from inside the app.
-- [ ] Show the app version and the bundled linux_util version (`vendor/linux_util.VERSION`) in the window
-- [ ] Check the GitHub releases of this repo for a newer version on launch, with a Settings switch to turn the check off; show what changed
-- [ ] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`
+- [x] Show the app version and the bundled linux_util version (`vendor/linux_util.VERSION`) in the window (bottom line)
+- [x] Check the GitHub releases of this repo for a newer version on launch, with a Settings switch to turn the check off; show what changed (a bar, and a dialog with the release notes; a "Check for updates" link checks on demand)
+- [x] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`
+
+Tested against a local stand-in for the GitHub release (`LU_RELEASES_URL`, which also lifts the download address check, for testing only) in containers under a virtual display, with real 0.1.0 and 0.2.0 builds: `.deb` on Ubuntu 22.04, `.rpm` on Fedora and openSUSE, AppImage on Ubuntu 22.04. Each took 0.1.0 to 0.2.0; a wrong checksum installed nothing; a read-only AppImage folder failed with a message. Not tested: Arch, or against the real GitHub API.
 
 A newer linux_util arrives in a new app release (open question 4): the app updates as a whole, unlike linux_util's own `git pull` self-update.
 

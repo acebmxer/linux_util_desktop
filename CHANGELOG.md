@@ -13,6 +13,14 @@ release is cut.
 
 ### Added
 
+- **Versions and updates**: the window's bottom line shows the app version and
+  the bundled linux_util version. On launch the app checks this project's
+  latest GitHub release (a Settings switch turns this off; a **Check for
+  updates** link checks on demand) and, when it is newer, shows a bar with the
+  release notes and an **Install update** button. The download is checked
+  against the release's `SHA256SUMS`; a `.deb` or `.rpm` is then installed with
+  apt-get, dnf or zypper through the password dialog, or the AppImage file is
+  replaced in place. A newer linux_util arrives with a new app release.
 - **Keyboard shortcuts** following linux_util's terminal menu: `/` search,
   `Esc` clear it, arrows, `Home` and `End` move through the list, `Space`
   selects, left and right switch category, `A` selects everything shown and `D`
