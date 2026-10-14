@@ -18,6 +18,12 @@ output, without opening a terminal.
 > [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work currently
 > stands.
 
+## Download
+
+Get the AppImage, `.deb` or `.rpm` from the
+[latest release](https://github.com/acebmxer/linux_util_desktop/releases/latest).
+[Packaging](#packaging) says which file to pick.
+
 ## What it is (and isn't)
 
 Linux_Util Desktop is a front end only. It contains **no install logic of its
@@ -107,7 +113,8 @@ installs need.
 
 Pushing a `v*` tag runs the Release workflow: it builds all three on Ubuntu
 22.04, checks the tag matches the version in `src-tauri/tauri.conf.json`,
-installs each in clean containers and attaches them to a draft GitHub release.
+installs each in clean containers and attaches them to the tag's GitHub
+release (created as a draft if it does not exist yet).
 
 To build and smoke-test locally (needs podman or docker for the tests):
 
