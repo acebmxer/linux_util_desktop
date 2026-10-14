@@ -29,7 +29,7 @@ Relied on: `schema` equals `linux_util/list/v1`; `utilities[]` entries have
 Notes:
 - The command prints a `Detected: ...` line **before** the JSON on stdout. The
   app must strip everything before the first `{` or ask linux_util to drop it.
-- There is no category field yet (see open question 2 in PLAN.md).
+- Each utility has `category` and `subcategory` (strings, `null` when absent; system tasks are category "System Tasks").
 
 ## Exit codes and output
 

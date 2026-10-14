@@ -1,5 +1,13 @@
 # Linux_Util Desktop
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/acebmxer/linux_util_desktop?label=version&sort=semver&color=brightgreen)](https://github.com/acebmxer/linux_util_desktop/tags)
+[![Last commit](https://img.shields.io/github/last-commit/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/commits)
+[![Issues](https://img.shields.io/github/issues/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/issues)
+[![Stars](https://img.shields.io/github/stars/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/stargazers)
+[![Forks](https://img.shields.io/github/forks/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/forks)
+[![Platform: Linux](https://img.shields.io/badge/platform-linux-333333?logo=linux&logoColor=white)](https://github.com/acebmxer/linux_util)
+
 A desktop app for [linux_util](https://github.com/acebmxer/linux_util). Pick
 utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.

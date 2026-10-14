@@ -70,7 +70,7 @@ Goal: see every utility and its install status. Nothing can change the system.
 - [ ] Rust command runs `--list --json --no-color`, strips the `Detected:` line
 - [ ] UI list with installed badge and version
 - [ ] Search box
-- [ ] Categories (depends on open question 2)
+- [ ] Categories (JSON fields exist on linux_util `dev`, unreleased)
 - [ ] Detected distro shown in the header
 - [ ] Light and dark theme following the system
 
@@ -113,10 +113,9 @@ Goal: installable builds on other distros.
 ## Open questions
 
 1. **Run the sudo shim approach?** Confirm in the Stage 3 spike (above).
-2. **Categories.** `--list --json` has no category field, but the TUI and README
-   group utilities into categories. Options: (a) add a `category` field to the
-   JSON in linux_util (a small change there, as `linux_util/list/v2`), or
-   (b) keep a mapping in this repo. (a) keeps one source of truth.
+2. **Categories.** Decided: (a). `linux_util` `--list --json` now has `category` and
+   `subcategory` on each utility (added to the existing `linux_util/list/v1`
+   schema, since the fields are additive). Not yet released in a linux_util tag.
 3. **Test coverage.** Where should the JSON contract test live?
 4. **Pinning policy.** One bundled script version per release, with no runtime
    downloads, as assumed in the README.
