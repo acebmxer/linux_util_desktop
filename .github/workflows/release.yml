@@ -1,0 +1,111 @@
+name: Release
+
+# On a version tag: builds the AppImage, .deb and .rpm, installs each in clean
+# Ubuntu, Fedora, openSUSE and Arch containers (scripts/smoke_test.sh), then
+# attaches them with SHA256SUMS to a draft GitHub release. Publishing the draft
+# is left to a person. Builds on Ubuntu 22.04 so the AppImage needs no newer
+# glibc than that.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libsoup-3.0-dev librsvg2-dev libssl-dev libayatana-appindicator3-dev \
+            file xdg-utils
+
+      - run: npm ci
+      - run: npm run contract
+      - run: npx tauri build
+
+      - name: Collect release files
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          bundle=src-tauri/target/release/bundle
+          mkdir release
+          cp "$bundle/deb/Linux_Util Desktop_${version}_amd64.deb" \
+            "release/linux_util_desktop_${version}_amd64.deb"
+          cp "$bundle/rpm/Linux_Util Desktop-${version}-1.x86_64.rpm" \
+            "release/linux_util_desktop-${version}-1.x86_64.rpm"
+          cp "$bundle/appimage/Linux_Util Desktop_${version}_amd64.AppImage" \
+            "release/linux_util_desktop_${version}_amd64.AppImage"
+          cd release
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [ubuntu, fedora, opensuse, arch]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Verify checksums
+        working-directory: release
+        run: sha256sum -c SHA256SUMS
+
+      - run: scripts/smoke_test.sh "${{ matrix.distro }}" release
+
+  release:
+    needs: smoke
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "Linux_Util Desktop $GITHUB_REF_NAME" \
+            --notes "Checksums for every file are in SHA256SUMS."

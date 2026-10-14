@@ -12,6 +12,7 @@ interface Utility {
 
 const SCHEMA = "linux_util/list/v1";
 const ALL = "All";
+const TASKS = "System Tasks";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -34,6 +35,25 @@ function parseList(raw: string): Utility[] {
 
 function categoryOf(u: Utility): string {
   return u.category || "Other";
+}
+
+function isTask(u: Utility): boolean {
+  return u.category === TASKS;
+}
+
+// System tasks change a setting rather than add software, so they are applied
+// and reverted instead of installed and uninstalled.
+const OP_WORDS: Record<Op, [string, string]> = {
+  install: ["Install", "Apply"],
+  uninstall: ["Uninstall", "Revert"],
+  update: ["Update", "Update"],
+};
+
+function opLabel(op: Op, names: string[]): string {
+  const [word, taskWord] = OP_WORDS[op];
+  const tasks = utilities.filter((u) => names.includes(u.name) && isTask(u)).length;
+  if (tasks === 0 || word === taskWord) return word;
+  return tasks === names.length ? taskWord : `${word} / ${taskWord}`;
 }
 
 function subOf(u: Utility): string {
@@ -143,7 +163,7 @@ function row(u: Utility, showSub: boolean): HTMLLIElement {
     }
     const badge = document.createElement("span");
     badge.className = "badge";
-    badge.textContent = "Installed";
+    badge.textContent = isTask(u) ? "Applied" : "Installed";
     li.append(badge);
   }
   return li;
@@ -185,13 +205,14 @@ function renderActionBar() {
   const bar = $("actionbar");
   bar.hidden = picked.size === 0;
   $("selcount").textContent = `${picked.size} selected`;
-  const buttons: [string, string, string[]][] = [
-    ["do-install", "Install", pickedWhere(false)],
-    ["do-update", "Update", pickedWhere(true)],
-    ["do-uninstall", "Uninstall", pickedWhere(true)],
+  const buttons: [string, Op, string[]][] = [
+    ["do-install", "install", pickedWhere(false)],
+    ["do-update", "update", pickedWhere(true)],
+    ["do-uninstall", "uninstall", pickedWhere(true)],
   ];
-  for (const [id, label, names] of buttons) {
+  for (const [id, op, names] of buttons) {
     const b = $<HTMLButtonElement>(id);
+    const label = opLabel(op, names.length ? names : [...picked]);
     b.textContent = names.length ? `${label} (${names.length})` : label;
     b.disabled = running || names.length === 0;
   }
@@ -228,7 +249,7 @@ async function start(op: Op) {
   const dryRun = $<HTMLInputElement>("dryrun").checked;
   logText = "";
   logEl().replaceChildren();
-  $("runtitle").textContent = `${op[0].toUpperCase()}${op.slice(1)}${dryRun ? " (dry run)" : ""}`;
+  $("runtitle").textContent = `${opLabel(op, names)}${dryRun ? " (dry run)" : ""}`;
   $("runsummary").textContent = "";
   $("queue").replaceChildren(
     ...names.map((n) => {

@@ -12,9 +12,10 @@ A desktop app for [linux_util](https://github.com/acebmxer/linux_util). Pick
 utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.
 
-> **Status: early development.** The app opens an empty window; no features yet.
-> See [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work
-> currently stands.
+> **Status: early development, no release yet.** The app lists every utility
+> with its install status, and installs, uninstalls and updates them. See
+> [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work currently
+> stands.
 
 ## What it is (and isn't)
 
@@ -25,8 +26,8 @@ non-interactive flags:
 | GUI action | Calls |
 |---|---|
 | Show utilities and install status | `linux_util.sh --list --json` |
-| Install | `linux_util.sh --install <name>` |
-| Uninstall | `linux_util.sh --uninstall <name>` |
+| Install (Apply for system tasks) | `linux_util.sh --install <name>` |
+| Uninstall (Revert for system tasks) | `linux_util.sh --uninstall <name>` |
 | Update one / all | `linux_util.sh --update <name>` / `--update-all` |
 | Preview without changing anything | adds `--dry-run` |
 
@@ -87,10 +88,39 @@ checks the bundled script still does what [docs/CONTRACT.md](docs/CONTRACT.md)
 says the app relies on. A daily workflow does both and opens a PR against `dev`
 when linux_util has a newer tag.
 
-## Packaging (planned)
+## Packaging
 
-AppImage (any distro), `.deb` and `.rpm`. Flatpak is intentionally skipped
-because its sandbox would block the admin rights that installs need.
+Each release has three files, plus `SHA256SUMS`:
+
+| File | For |
+|---|---|
+| `linux_util_desktop_<version>_amd64.deb` | Debian, Ubuntu and derivatives |
+| `linux_util_desktop-<version>-1.x86_64.rpm` | Fedora, RHEL family, openSUSE |
+| `linux_util_desktop_<version>_amd64.AppImage` | Any distro, including Arch |
+
+The `.deb` and `.rpm` pull in WebKitGTK, GTK, `bash` and `sudo` through the
+package manager. The AppImage carries WebKitGTK itself but, like any AppImage,
+uses the desktop's own GTK, fonts and graphics libraries. Flatpak is
+intentionally skipped because its sandbox would block the admin rights that
+installs need.
+
+Pushing a `v*` tag runs the Release workflow: it builds all three on Ubuntu
+22.04, checks the tag matches the version in `src-tauri/tauri.conf.json`,
+installs each in clean containers and attaches them to a draft GitHub release.
+
+To build and smoke-test locally (needs podman or docker for the tests):
+
+```
+npx tauri build
+scripts/smoke_test.sh ubuntu src-tauri/target/release/bundle/deb
+scripts/smoke_test.sh fedora src-tauri/target/release/bundle/rpm
+scripts/smoke_test.sh opensuse src-tauri/target/release/bundle/rpm
+scripts/smoke_test.sh arch src-tauri/target/release/bundle/appimage
+```
+
+The smoke test installs the package with the distro's own package manager,
+checks the bundled linux_util and desktop entry, then starts the app as a
+normal user on a virtual display and fails if it exits.
 
 ## Versioning
 

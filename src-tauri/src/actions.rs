@@ -82,7 +82,7 @@ pub fn askpass_client() -> ! {
 }
 
 fn find_in_path(program: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
+    std::env::split_paths(&crate::host_var("PATH")?)
         .map(|d| d.join(program))
         .find(|p| p.is_file())
 }
@@ -124,9 +124,17 @@ impl Workdir {
             work.bin_dir().join("sudo"),
             format!("#!/bin/sh\nexec {} -A \"$@\"\n", shell_quote(&real_sudo.to_string_lossy())),
         )?;
+        // linux_util.sh runs with the AppImage's library path removed (see
+        // `use_host_env`), but this executable still needs the bundled libraries.
+        let libs = match (crate::host_var("LD_LIBRARY_PATH"), std::env::var("LD_LIBRARY_PATH")) {
+            (host, Ok(own)) if host.as_deref() != Some(std::ffi::OsStr::new(&own)) => {
+                format!("LD_LIBRARY_PATH={}\nexport LD_LIBRARY_PATH\n", shell_quote(&own))
+            }
+            _ => String::new(),
+        };
         write_exec(
             work.askpass_path(),
-            format!("#!/bin/sh\nexec {} --askpass \"$@\"\n", shell_quote(&exe.to_string_lossy())),
+            format!("#!/bin/sh\n{libs}exec {} --askpass \"$@\"\n", shell_quote(&exe.to_string_lossy())),
         )?;
         Ok(work)
     }
@@ -149,7 +157,9 @@ impl Drop for Workdir {
 
 /// True when `password` is accepted by sudo. Ignores any cached credentials.
 fn password_ok(real_sudo: &Path, password: &str) -> bool {
-    let Ok(mut child) = Command::new(real_sudo)
+    let mut cmd = Command::new(real_sudo);
+    crate::use_host_env(&mut cmd);
+    let Ok(mut child) = cmd
         .args(["-S", "-k", "-v", "-p", ""])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -321,7 +331,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
     });
 
     let mut path = std::ffi::OsString::from(work.bin_dir());
-    if let Some(old) = std::env::var_os("PATH") {
+    if let Some(old) = crate::host_var("PATH") {
         path.push(":");
         path.push(old);
     }
@@ -333,6 +343,7 @@ fn run_queue(app: &AppHandle, script: &Path, op: &str, names: &[String], dry_run
         }
         let _ = app.emit("run-item", ItemEvent { index, name, state: "running", code: None });
         let mut cmd = Command::new("bash");
+        crate::use_host_env(&mut cmd);
         cmd.arg(script);
         if dry_run {
             cmd.arg("--dry-run");

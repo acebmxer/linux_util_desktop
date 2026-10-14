@@ -3,7 +3,8 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 4 (sync and contract) complete. Next: Stage 5.**
+**Current stage: 5 (packaging and release) built, except the first release
+`v0.1.0`.**
 
 ## Decisions made
 
@@ -102,11 +103,19 @@ Goal: keep the bundled script current without surprises.
 
 ### Stage 5: Packaging and release
 Goal: installable builds on other distros.
-- [ ] AppImage, `.deb`, `.rpm` via Tauri bundler
-- [ ] Declare the WebKitGTK dependency in `.deb` and `.rpm`
-- [ ] Release workflow on tag push, with checksums
-- [ ] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE
+- [x] AppImage, `.deb`, `.rpm` via Tauri bundler (built on Ubuntu 22.04, the same as the Release workflow)
+- [x] Declare the WebKitGTK dependency in `.deb` and `.rpm`: Tauri adds WebKitGTK and GTK itself (the `.rpm` by soname, so it resolves on openSUSE too); `bash` and `sudo` added
+- [x] Release workflow on tag push, with checksums (`release.yml`: tag must match the app version, draft release; not yet run on GitHub)
+- [x] Smoke-test installs in containers: Ubuntu, Fedora, Arch, openSUSE (`scripts/smoke_test.sh`, also a job in `release.yml`; run locally with podman, all four pass)
 - [ ] First tagged release `v0.1.0`
+
+Found while testing: the AppImage's launcher points `LD_LIBRARY_PATH`, `PATH`
+and the GTK/GIO paths into the bundle, so on Arch `curl`, `git` and `pacman`
+run by linux_util.sh crashed with "symbol lookup error". The app now gives
+linux_util.sh the host's environment back and runs it from the home directory
+(`use_host_env` in `lib.rs`); the askpass helper keeps the bundle's library
+path. Checked on Arch: a full Parallel Downloads install from the AppImage,
+password dialog included, succeeded and showed Installed.
 
 ### Stage 6: Polish
 - [ ] Profiles (`--export-profile`, `--import-profile`)

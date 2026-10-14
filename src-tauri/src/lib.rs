@@ -1,9 +1,64 @@
 mod actions;
 
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::process::Command;
 
 use tauri::Manager;
+
+/// The AppImage's unpacked bundle directory, when running from an AppImage.
+fn appimage_dir() -> Option<OsString> {
+    std::env::var_os("APPIMAGE")?;
+    std::env::var_os("APPDIR").filter(|d| d.len() > 1)
+}
+
+/// `value` without the `:`-separated entries inside `appdir`; `None` when
+/// nothing is left. Values that never mention `appdir` come back unchanged.
+fn strip_appdir(value: &OsStr, appdir: &OsStr) -> Option<OsString> {
+    let (bytes, dir) = (value.as_bytes(), appdir.as_bytes());
+    if !bytes.windows(dir.len()).any(|w| w == dir) {
+        return Some(value.to_owned());
+    }
+    let inside = |e: &[u8]| e == dir || (e.starts_with(dir) && e.get(dir.len()) == Some(&b'/'));
+    let kept: Vec<&[u8]> = bytes.split(|b| *b == b':').filter(|e| !e.is_empty() && !inside(e)).collect();
+    (!kept.is_empty()).then(|| OsString::from_vec(kept.join(&b':')))
+}
+
+/// An environment variable as the host set it: under an AppImage, without the
+/// entries its launcher added inside the bundle.
+pub(crate) fn host_var(key: &str) -> Option<OsString> {
+    let value = std::env::var_os(key)?;
+    match appimage_dir() {
+        Some(dir) => strip_appdir(&value, &dir),
+        None => Some(value),
+    }
+}
+
+/// The AppImage launcher points `PATH`, `LD_LIBRARY_PATH`, `XDG_DATA_DIRS`,
+/// the GTK and GIO module paths and more into the bundle, and forces
+/// `GTK_THEME`. Programs that linux_util.sh starts need the host's own, or they
+/// load the bundle's older libraries and fail (curl, git and pacman: "symbol
+/// lookup error"). It also starts the app inside the bundle, so `cmd` runs from
+/// the home directory instead. Outside an AppImage this changes nothing.
+pub(crate) fn use_host_env(cmd: &mut Command) {
+    let Some(dir) = appimage_dir() else { return };
+    if let Some(home) = std::env::var_os("HOME").filter(|h| std::path::Path::new(h).is_dir()) {
+        cmd.current_dir(home);
+    }
+    for (key, value) in std::env::vars_os() {
+        match strip_appdir(&value, &dir) {
+            Some(kept) if kept == value => {}
+            Some(kept) => {
+                cmd.env(key, kept);
+            }
+            None => {
+                cmd.env_remove(key);
+            }
+        }
+    }
+    cmd.env_remove("GTK_THEME");
+}
 
 /// Finds the bundled `linux_util.sh`: the packaged resource directory first,
 /// then the repo's `vendor/` directory when running from a source checkout.
@@ -30,7 +85,9 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
     let script = script_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let output = Command::new("bash")
+        let mut cmd = Command::new("bash");
+        use_host_env(&mut cmd);
+        let output = cmd
             .arg(&script)
             .args(["--list", "--json", "--no-color"])
             .output()
