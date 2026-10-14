@@ -11,6 +11,8 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
 ### Added
 
 - **Versions and updates**: the window's bottom line shows the app version and
