@@ -1,3 +1,5 @@
+mod actions;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -5,7 +7,7 @@ use tauri::Manager;
 
 /// Finds the bundled `linux_util.sh`: the packaged resource directory first,
 /// then the repo's `vendor/` directory when running from a source checkout.
-fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Ok(dir) = app.path().resource_dir() {
         candidates.push(dir.join("vendor").join("linux_util.sh"));
@@ -63,6 +65,11 @@ fn detected_distro() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Entry point for `SUDO_ASKPASS` (`--askpass`): no window, just print the password.
+pub fn askpass() -> ! {
+    actions::askpass_client()
+}
+
 pub fn run() {
     // WebKitGTK's DMA-BUF renderer crashes the window on some Wayland + NVIDIA
     // setups ("Error 71 (Protocol error) dispatching to Wayland display").
@@ -72,7 +79,14 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![run_list, detected_distro])
+        .manage(actions::RunState::default())
+        .invoke_handler(tauri::generate_handler![
+            run_list,
+            detected_distro,
+            actions::run_action,
+            actions::askpass_reply,
+            actions::cancel_run
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Linux_Util Desktop");
 }

@@ -1708,6 +1708,8 @@ dependencies = [
 name = "linux_util_desktop"
 version = "0.0.0"
 dependencies = [
+ "libc",
+ "serde",
  "tauri",
  "tauri-build",
 ]

@@ -3,7 +3,7 @@
 Built in stages, each ending in something that works and can be committed, so
 it is safe to stop between any two. Tick the boxes as work completes.
 
-**Current stage: 2 (read-only list) built. Next: Stage 3.**
+**Current stage: 3 (actions) built. Next: Stage 4.**
 
 ## Decisions made
 
@@ -70,19 +70,28 @@ Goal: see every utility and its install status. Nothing can change the system.
 - [x] Rust command runs `--list --json --no-color`, strips the `Detected:` line
 - [x] UI list with installed badge and version
 - [x] Search box
-- [x] Categories (JSON fields ship in linux_util v1.9.0, now vendored)
+- [x] Categories (JSON fields ship in linux_util v1.9.0, now vendored); sub-categories group the list and nest in the sidebar
 - [x] Detected distro shown in the header (read from `/etc/os-release`; v1.8.0 prints no `Detected:` line)
 - [x] Light and dark theme following the system
 
 ### Stage 3: Actions
 Goal: install, uninstall and update from the app.
-- [ ] **Spike:** prove the `sudo -A` shim and askpass dialog end to end on Fedora
-- [ ] Run one action with live output streamed into a log pane
-- [ ] Install, uninstall, update, and the exit-code result
-- [ ] Multi-select and a run queue
-- [ ] Dry-run toggle
-- [ ] Cancel a running action, and block a second concurrent run
-- [ ] Error display and a copy-log button
+- [x] **Spike:** prove the `sudo -A` shim and askpass end to end on Fedora (2026-10-14, Fedora container, non-root user, no TTY, stdin `/dev/null`): `--install` and `--uninstall "Parallel Downloads"` both ran, exit 0; askpass was called once per `sudo` call (no credential cache without a TTY); an askpass that exits 1 makes the action fail with exit 1 and no hang
+- [x] Run one action with live output streamed into a log pane
+- [x] Install, uninstall, update, and the exit-code result (update: same code path, not run)
+- [x] Multi-select and a run queue (queue: one utility at a time; only one-item runs exercised)
+- [x] Dry-run toggle
+- [x] Cancel a running action, and block a second concurrent run (concurrent block: Rust check plus disabled buttons; only the disabled buttons were seen)
+- [x] Error display and a copy-log button (copy button: not clicked in the test)
+
+Built: `src-tauri/src/actions.rs` (run queue, `sudo` shim, askpass over a private
+Unix socket, password checked once with `sudo -S -k -v` and kept in memory for
+one run) and the action bar, log pane and password dialog in the UI. Actions run
+from a per-user copy of the vendored script in the app data directory, because
+`linux_util.sh` writes `logs/` next to itself and the bundled copy can be
+read-only. Dry run still asks for the password (the script refreshes the
+package cache first). Tested in a Fedora 45 container under a virtual display,
+not on a real desktop.
 
 ### Stage 4: Sync and contract
 Goal: keep the bundled script current without surprises.

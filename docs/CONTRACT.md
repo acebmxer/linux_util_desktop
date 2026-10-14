@@ -36,8 +36,11 @@ Notes:
 ## Exit codes and output
 
 Install, uninstall and update run to completion and exit non-zero on failure.
-The app shows stdout and stderr live and reports the exit code. To be confirmed
-and recorded here in Stage 3.
+The app shows stdout and stderr live and reports the exit code. Confirmed in
+Stage 3 against v1.9.0: exit 0 on success, 1 on failure (including a refused
+`sudo` password); cancelling ends the script by signal, so it has no exit code. `--dry-run` goes before
+the action flag and still asks for `sudo` once (package cache refresh). The
+script writes `logs/` next to itself, so the app runs a per-user copy.
 
 ## Privileges
 

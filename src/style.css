@@ -128,3 +128,88 @@ input[type="search"] {
 #status { margin: 0; padding: 8px 16px; }
 #status:empty { display: none; }
 #status.error { color: #dc2626; }
+
+.spacer { flex: 1; }
+
+button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.link { border: 0; background: none; color: var(--accent); padding: 0; }
+
+#list li input[type="checkbox"] { margin: 0; }
+#list li.selected { background: var(--panel); }
+
+#actionbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+#actionbar[hidden], #runpanel[hidden] { display: none; }
+
+#runpanel {
+  display: flex;
+  flex-direction: column;
+  height: 40vh;
+  min-height: 160px;
+  border-top: 1px solid var(--border);
+}
+#runhead { display: flex; align-items: center; gap: 10px; padding: 8px 16px; }
+#queue { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0 16px 8px; list-style: none; }
+#queue li { padding: 2px 8px; border-radius: 10px; background: var(--panel); font-size: 12px; }
+#queue li.running { background: var(--accent); color: var(--accent-text); }
+#queue li.ok { background: var(--ok-bg); color: var(--ok-text); }
+#queue li.failed { background: #fee2e2; color: #991b1b; }
+#queue li.cancelled { color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  #queue li.failed { background: #7f1d1d; color: #fecaca; }
+}
+#log {
+  flex: 1;
+  margin: 0;
+  padding: 8px 16px;
+  overflow: auto;
+  background: var(--panel);
+  font: 12px/1.4 ui-monospace, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+#log .err { color: #dc2626; }
+
+dialog {
+  width: 360px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+dialog h2 { margin: 0 0 4px; font-size: 16px; }
+dialog input { width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.error { color: #dc2626; }
+dialog .error { min-height: 1.2em; margin: 8px 0; }
+
+#list li.group {
+  position: sticky;
+  top: 0;
+  padding: 6px 16px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#categories button.sub { padding-left: 24px; font-size: 13px; }

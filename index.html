@@ -16,7 +16,40 @@
         <nav id="categories" hidden></nav>
         <ul id="list"></ul>
       </div>
+      <section id="runpanel" hidden>
+        <div id="runhead">
+          <strong id="runtitle"></strong>
+          <span id="runsummary" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="cancel" type="button">Cancel</button>
+          <button id="copylog" type="button">Copy log</button>
+          <button id="closerun" type="button">Close</button>
+        </div>
+        <ol id="queue"></ol>
+        <pre id="log"></pre>
+      </section>
+      <div id="actionbar" hidden>
+        <span id="selcount"></span>
+        <button id="clearsel" type="button" class="link">Clear</button>
+        <span class="spacer"></span>
+        <label><input id="dryrun" type="checkbox" /> Dry run</label>
+        <button id="do-install" type="button"></button>
+        <button id="do-update" type="button"></button>
+        <button id="do-uninstall" type="button"></button>
+      </div>
       <p id="status" class="muted">Loading utilities…</p>
+      <dialog id="askpass">
+        <form method="dialog" id="askform">
+          <h2>Administrator password</h2>
+          <p class="muted">Needed to change system software.</p>
+          <input id="askpw" type="password" autocomplete="off" required />
+          <p id="askerr" class="error"></p>
+          <div class="buttons">
+            <button id="askcancel" type="button">Cancel</button>
+            <button id="askok" type="submit" class="primary">Authenticate</button>
+          </div>
+        </form>
+      </dialog>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
