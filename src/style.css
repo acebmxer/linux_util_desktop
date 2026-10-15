@@ -104,8 +104,15 @@ input[type="search"] {
   overflow-y: auto;
   padding: 8px;
   background: var(--panel);
-  border-right: 1px solid var(--border);
 }
+
+#sidebarhandle {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--border);
+}
+#sidebarhandle:hover, #sidebarhandle:focus-visible, #sidebarhandle.dragging { background: var(--accent); outline: none; }
 
 #categories button {
   display: flex;

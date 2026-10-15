@@ -11,6 +11,13 @@ release is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **The window size and the sidebar width are remembered.** The window opens at
+  the size (and maximized state) it was closed with. The sidebar can be dragged
+  wider or narrower by its right edge (or with the arrow keys while the edge is
+  focused); double-click the edge to go back to the default width.
+
 ### Fixed
 
 - **Categories and subcategories were in a different order from linux_util.**

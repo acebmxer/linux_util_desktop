@@ -123,6 +123,7 @@ function renderCategories() {
   const nav = $("categories");
   const hasCategories = utilities.some((u) => u.category);
   nav.hidden = !hasCategories;
+  $("sidebarhandle").hidden = !hasCategories;
   if (!hasCategories) return;
 
   // Counts follow the search; categories stay listed even at zero.
@@ -1044,6 +1045,58 @@ $<HTMLInputElement>("search").addEventListener("input", (ev) => {
   query = (ev.target as HTMLInputElement).value;
   if (loaded) render();
 });
+
+// ---- sidebar width ----
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 600;
+
+function setSidebarWidth(px: number): number {
+  const width = Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, px)));
+  $("categories").style.width = `${width}px`;
+  return width;
+}
+
+function saveSidebarWidth() {
+  const width = Math.round($("categories").getBoundingClientRect().width);
+  invoke("set_sidebar_width", { width }).catch(() => {});
+}
+
+(() => {
+  const handle = $("sidebarhandle");
+  handle.addEventListener("pointerdown", (ev) => {
+    handle.setPointerCapture(ev.pointerId);
+    handle.classList.add("dragging");
+    document.body.style.userSelect = "none";
+  });
+  handle.addEventListener("pointermove", (ev) => {
+    if (!handle.hasPointerCapture(ev.pointerId)) return;
+    setSidebarWidth(ev.clientX - $("categories").getBoundingClientRect().left);
+  });
+  const end = (ev: PointerEvent) => {
+    if (!handle.hasPointerCapture(ev.pointerId)) return;
+    handle.releasePointerCapture(ev.pointerId);
+    handle.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    saveSidebarWidth();
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+  handle.addEventListener("keydown", (ev) => {
+    const step = ev.key === "ArrowLeft" ? -16 : ev.key === "ArrowRight" ? 16 : 0;
+    if (!step) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    setSidebarWidth($("categories").getBoundingClientRect().width + step);
+    saveSidebarWidth();
+  });
+  handle.addEventListener("dblclick", () => {
+    $("categories").style.width = "";
+    saveSidebarWidth();
+  });
+  invoke<number | null>("get_sidebar_width").then((w) => {
+    if (w) setSidebarWidth(w);
+  });
+})();
 
 invoke<Settings>("get_settings").then((s) => {
   settings = s;

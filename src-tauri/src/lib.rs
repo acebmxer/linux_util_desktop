@@ -3,6 +3,7 @@ mod logs;
 mod profiles;
 mod settings;
 mod update;
+mod window_state;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -256,6 +257,19 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(actions::RunState::default())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window_state::restore(&window);
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+                    window_state::save(&w);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             run_list,
             detected_distro,
@@ -270,6 +284,8 @@ pub fn run() {
             profiles::import_profile,
             profiles::export_profile,
             settings::get_settings,
+            window_state::get_sidebar_width,
+            window_state::set_sidebar_width,
             settings::save_settings,
             logs::list_logs,
             logs::read_log,
