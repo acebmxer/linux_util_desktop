@@ -11,6 +11,8 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
 ### Added
 
 - **The window size and the sidebar width are remembered.** The window opens at
