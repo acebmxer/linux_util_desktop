@@ -65,12 +65,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Stable and beta alike: a beta of a version that is already released would
+      # be labelled with the old number (v0.2.1-beta.12 after v0.2.1).
       - name: Stop if this version is already released
-        if: github.ref_name == 'main'
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
-            echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json first"
+            echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json (and package.json, src-tauri/Cargo.toml) on this branch first"
             exit 1
           fi
 
