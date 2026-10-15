@@ -110,6 +110,7 @@ input[type="search"] {
   width: 5px;
   flex-shrink: 0;
   cursor: col-resize;
+  user-select: none;
   background: var(--border);
 }
 #sidebarhandle:hover, #sidebarhandle:focus-visible, #sidebarhandle.dragging { background: var(--accent); outline: none; }

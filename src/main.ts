@@ -1063,7 +1063,10 @@ function saveSidebarWidth() {
 
 (() => {
   const handle = $("sidebarhandle");
+  // Without this, the press starts a text selection that the drag then extends.
+  handle.addEventListener("mousedown", (ev) => ev.preventDefault());
   handle.addEventListener("pointerdown", (ev) => {
+    window.getSelection()?.removeAllRanges();
     handle.setPointerCapture(ev.pointerId);
     handle.classList.add("dragging");
     document.body.style.userSelect = "none";

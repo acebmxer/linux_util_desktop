@@ -18,6 +18,8 @@ release is cut.
   wider or narrower by its right edge (or with the arrow keys while the edge is
   focused); double-click the edge to go back to the default width.
 
+  Dragging the edge no longer highlights the text around the pointer.
+
 ### Fixed
 
 - **Categories and subcategories were in a different order from linux_util.**
