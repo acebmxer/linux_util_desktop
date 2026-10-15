@@ -13,6 +13,13 @@ release is cut.
 
 ### Fixed
 
+- **Run output was red** for everything the script wrote to stderr, including
+  dnf's normal progress. Only the app's own errors are red now; the script's
+  output shows plain, as in a terminal.
+- **Cancel did nothing while the package cache refreshed.** The refresh runs
+  under `timeout`, in a process group Cancel did not signal, so a slow or
+  retrying mirror kept the run going until it ended. Cancel now also signals
+  every process below the script.
 - **System Updates with nothing to update** showed as failed (exit 1).
   linux_util's `--install` turns its "success, no changes" result into exit 1,
   so a run that ends with "No package changes were made." now counts as

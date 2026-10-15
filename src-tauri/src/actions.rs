@@ -45,6 +45,9 @@ struct Inner {
 struct Output<'a> {
     text: &'a str,
     stderr: bool,
+    /// Shown in the error colour. The script's own stderr is not: tools such as
+    /// dnf write their normal progress there, and a terminal shows it plain.
+    error: bool,
     /// The line so far, still waiting for its newline (e.g. a `[y/N]` prompt).
     /// The next event on the same stream replaces it.
     partial: bool,
@@ -408,25 +411,25 @@ fn pump<R: Read + Send + 'static>(
                 if text.contains(NO_CHANGES_LINE) {
                     no_changes.store(true, Ordering::SeqCst);
                 }
-                let _ = app.emit("run-output", Output { text: &text, stderr, partial: false });
+                let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: false });
             }
             if !pending.is_empty() {
                 let text = clean_line(&pending);
-                let _ = app.emit("run-output", Output { text: &text, stderr, partial: true });
+                let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: true });
             }
         }
         let mut pending = pending.lock().unwrap();
         if !pending.is_empty() {
             let text = clean_line(&pending);
             pending.clear();
-            let _ = app.emit("run-output", Output { text: &text, stderr, partial: false });
+            let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: false });
         }
     })
 }
 
 /// Tells the UI a line of output. `stderr` lines show in the error colour.
 pub(crate) fn emit_output(app: &AppHandle, text: &str, stderr: bool) {
-    let _ = app.emit("run-output", Output { text, stderr, partial: false });
+    let _ = app.emit("run-output", Output { text, stderr, error: stderr, partial: false });
 }
 
 /// Tells the UI the state of queue entry `index`.
@@ -495,7 +498,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
-                let _ = app.emit("run-output", Output { text: &msg, stderr: true, partial: false });
+                let _ = app.emit("run-output", Output { text: &msg, stderr: true, error: true, partial: false });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
                 continue;
@@ -672,12 +675,52 @@ pub fn cancel_run(state: State<'_, RunState>) {
     };
     let Some(pid) = pid else { return };
     let group = -(pid as i32);
+    // Commands the script runs under `timeout` (the package cache refresh) sit
+    // in a process group of their own, so the group signal alone never reaches
+    // them and the script, waiting on one, cannot act on it until it ends.
+    let others = descendants(pid);
     unsafe { libc::kill(group, libc::SIGTERM) };
+    for &p in &others {
+        unsafe { libc::kill(p as i32, libc::SIGTERM) };
+    }
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(5));
         // Signal 0 only checks that the group still exists.
         if unsafe { libc::kill(group, 0) } == 0 {
             unsafe { libc::kill(group, libc::SIGKILL) };
         }
+        for p in others {
+            unsafe { libc::kill(p as i32, libc::SIGKILL) };
+        }
     });
+}
+
+/// Every process below `root` in the process tree, read from `/proc`.
+fn descendants(root: u32) -> Vec<u32> {
+    let mut parent_of = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // The command name in parentheses may hold spaces; the parent pid
+            // is the second field after its closing bracket.
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
+            if let Some(ppid) = rest.split_whitespace().nth(1).and_then(|s| s.parse::<u32>().ok()) {
+                parent_of.push((pid, ppid));
+            }
+        }
+    }
+    let mut found = vec![root];
+    let mut i = 0;
+    while i < found.len() {
+        let parent = found[i];
+        found.extend(parent_of.iter().filter(|&&(_, pp)| pp == parent).map(|&(p, _)| p));
+        i += 1;
+    }
+    found.remove(0);
+    found
 }

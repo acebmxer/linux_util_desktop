@@ -287,13 +287,13 @@ let logText = "";
 // The next output on that stream replaces its text.
 const partialLines = new Map<boolean, HTMLDivElement>();
 
-function appendLog(text: string, stderr = false, partial = false) {
+function appendLog(text: string, stderr = false, partial = false, error = stderr) {
   const pre = logEl();
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
   let line = partialLines.get(stderr);
   if (!line) {
     line = document.createElement("div");
-    if (stderr) line.className = "err";
+    if (error) line.className = "err";
     pre.append(line);
   }
   line.textContent = text;
@@ -449,8 +449,8 @@ $<HTMLDialogElement>("askpass").addEventListener("cancel", (ev) => {
   stopAsking(null);
 });
 
-listen<{ text: string; stderr: boolean; partial: boolean }>("run-output", (ev) =>
-  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial),
+listen<{ text: string; stderr: boolean; error: boolean; partial: boolean }>("run-output", (ev) =>
+  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial, ev.payload.error),
 );
 listen<{ index: number; name: string; state: string; code: number | null }>("run-item", (ev) => {
   const { index, name, state, code } = ev.payload;
