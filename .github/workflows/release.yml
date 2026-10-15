@@ -159,9 +159,11 @@ jobs:
           notes="Stable release. Checksums for every file are in SHA256SUMS."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
             tag="v$version-beta.$GITHUB_RUN_NUMBER"
-            title="Linux_Util Desktop $tag (beta)"
+            title="$tag"
             flags=(--prerelease)  # published, not a draft: the app cannot see drafts
-            notes="Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS."
+            # What is new in this beta is what CHANGELOG.md lists under [Unreleased].
+            unreleased=$(awk '/^## \[Unreleased\]/{f=1; next} /^## \[/{f=0} f' CHANGELOG.md)
+            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS." "$unreleased")
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # A beta is published on creation, so only a stable release is protected once public.
@@ -171,6 +173,9 @@ jobs:
             fi
             # The files are rebuilt from this commit, so the tag must point here too.
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
+            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes"
+            fi
             gh release upload "$tag" release/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" release/* \

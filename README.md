@@ -154,8 +154,9 @@ workflow builds all three on Ubuntu 22.04, installs each in clean containers
 and attaches them to a **draft** GitHub release for that version, marked
 **stable**. Publishing the draft creates the tag, so the files are already
 there. Running the workflow by hand on `dev` (Actions → Release → Run workflow)
-publishes a **beta** pre-release at once, tagged `v<version>-beta.<run number>`,
-for testing the real packages before the PR to `main`. Betas are never
+publishes a **beta** pre-release at once, tagged `v<version>-beta.<run number>`
+and titled with the tag, its notes listing what `CHANGELOG.md` has under
+`[Unreleased]`, for testing the real packages before the PR to `main`. Betas are never
 "latest"; the app offers them only when **Include beta versions** is on.
 
 To build and smoke-test locally (needs podman or docker for the tests):
