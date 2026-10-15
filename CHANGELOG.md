@@ -20,6 +20,8 @@ release is cut.
 
 ### Added
 
+- **App icon**: a terminal-prompt icon in a hexagon replaces the placeholder
+  icon in the window, menu and packages.
 - **Beta updates**: the Release workflow can now be started by hand on `dev`
   (Actions → Release → Run workflow); it publishes the AppImage,
   `.deb` and `.rpm` as a **beta** pre-release, tagged
