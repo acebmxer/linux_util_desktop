@@ -13,6 +13,10 @@ release is cut.
 
 ### Fixed
 
+- **Categories and subcategories were in a different order from linux_util.**
+  The sidebar followed the order utilities were registered in. It now uses the
+  menu's own `CATEGORIES` and `SUBCATEGORY_ORDER`, read from the bundled script,
+  so a linux_util sync keeps the two in step.
 - **Reboot now asked for the password a second time.** It ran `systemctl reboot`
   as the user, so the desktop's own prompt appeared. It now reuses the sudo
   password given for the run, held in memory only until the reboot offer ends.

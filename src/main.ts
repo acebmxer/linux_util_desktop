@@ -30,11 +30,29 @@ let updating = false;
 let cursor: string | null = null;
 type Op = "install" | "uninstall" | "update";
 
+// linux_util's menu order for categories and, per category, its subcategories
+// (the Rust side reads both from the bundled script). Names not listed come after.
+let categoryOrder: string[] = [];
+let subcategoryOrder: Record<string, string[]> = {};
+
+function byMenuOrder<T>(entries: [string, T][], order: string[]): [string, T][] {
+  const rank = (name: string) => {
+    const i = order.indexOf(name);
+    return i < 0 ? order.length : i;
+  };
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => rank(a.e[0]) - rank(b.e[0]) || a.i - b.i)
+    .map(({ e }) => e);
+}
+
 function parseList(raw: string): Utility[] {
   const doc = JSON.parse(raw);
   if (doc?.schema !== SCHEMA || !Array.isArray(doc.utilities)) {
     throw new Error(`Unexpected output from linux_util (expected ${SCHEMA})`);
   }
+  categoryOrder = Array.isArray(doc.category_order) ? doc.category_order : [];
+  subcategoryOrder = doc.subcategory_order && typeof doc.subcategory_order === "object" ? doc.subcategory_order : {};
   return doc.utilities as Utility[];
 }
 
@@ -113,7 +131,7 @@ function renderCategories() {
   const found = utilities.filter(matchesQuery);
   for (const u of found) counts.set(categoryOf(u), (counts.get(categoryOf(u)) ?? 0) + 1);
 
-  const entries: [string, number][] = [[ALL, found.length], ...counts];
+  const entries: [string, number][] = [[ALL, found.length], ...byMenuOrder([...counts], categoryOrder)];
   const navButton = (label: string, count: number, current: boolean, sub: boolean, onClick: () => void) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -146,7 +164,7 @@ function renderCategories() {
       subs.set(subOf(u), (subs.get(subOf(u)) ?? 0) + 1);
     }
     if (subs.size < 2) continue;
-    for (const [sub, n] of subs) {
+    for (const [sub, n] of byMenuOrder([...subs], subcategoryOrder[name] ?? [])) {
       buttons.push(
         navButton(sub, n, selectedSub === sub, true, () => {
           selectedSub = sub;
@@ -210,8 +228,9 @@ function renderList() {
   const shown = utilities.filter(matches);
   $("count").textContent = `${shown.length} of ${utilities.length} utilities`;
   // Inside one category the list is grouped under its subcategories.
-  const groups = new Map<string, Utility[]>();
-  for (const u of shown) groups.set(subOf(u), [...(groups.get(subOf(u)) ?? []), u]);
+  const unordered = new Map<string, Utility[]>();
+  for (const u of shown) unordered.set(subOf(u), [...(unordered.get(subOf(u)) ?? []), u]);
+  const groups = new Map(byMenuOrder([...unordered], subcategoryOrder[selected] ?? []));
   const grouped = selected !== ALL && selectedSub === null && groups.size > 1;
   const items: HTMLElement[] = [];
   if (grouped) {

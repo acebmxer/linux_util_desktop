@@ -153,6 +153,46 @@ fn with_descriptions(json: &str, script: &std::path::Path) -> String {
     doc.to_string()
 }
 
+/// The menu's own tab order: `CATEGORIES=(...)` and the per-category
+/// `SUBCATEGORY_ORDER["Category"]="A|B"` lines in `lib/installers.sh`. The list
+/// JSON carries neither, and the desktop app must show the same order as the
+/// menu. Missing or unreadable lines give empty results, never an error.
+fn read_menu_order(script: &std::path::Path) -> (Vec<String>, serde_json::Map<String, serde_json::Value>) {
+    let mut categories = Vec::new();
+    let mut subs = serde_json::Map::new();
+    let Some(dir) = script.parent() else { return (categories, subs) };
+    let Ok(text) = std::fs::read_to_string(dir.join("lib").join("installers.sh")) else {
+        return (categories, subs);
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("CATEGORIES=(") {
+            let body = rest.split(')').next().unwrap_or("");
+            categories = body.split('"').skip(1).step_by(2).map(str::to_string).collect();
+        } else if let Some(rest) = line.strip_prefix("SUBCATEGORY_ORDER[\"") {
+            let Some((name, rest)) = rest.split_once("\"]=\"") else { continue };
+            let Some(body) = rest.strip_suffix('"') else { continue };
+            let order: Vec<&str> = body.split('|').collect();
+            subs.insert(name.to_string(), serde_json::json!(order));
+        }
+    }
+    (categories, subs)
+}
+
+/// Adds `category_order` and `subcategory_order` to the list JSON. Returns the
+/// JSON unchanged if it can't be parsed. Delete this once linux_util puts them
+/// in the list JSON itself.
+fn with_menu_order(json: &str, script: &std::path::Path) -> String {
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let (categories, subs) = read_menu_order(script);
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("category_order".into(), serde_json::json!(categories));
+        obj.insert("subcategory_order".into(), subs.into());
+    }
+    doc.to_string()
+}
+
 /// Runs `linux_util.sh --list --json --no-color` and returns the JSON document.
 /// Anything printed before the first `{` (such as a `Detected:` line) is dropped.
 #[tauri::command]
@@ -174,7 +214,7 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
             ));
         }
         match stdout.find('{') {
-            Some(start) => Ok(with_descriptions(&stdout[start..], &script)),
+            Some(start) => Ok(with_menu_order(&with_descriptions(&stdout[start..], &script), &script)),
             None => Err("linux_util.sh --list produced no JSON".to_string()),
         }
     })
