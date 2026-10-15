@@ -11,10 +11,10 @@ run-name: ${{ inputs.description || github.event.head_commit.message || 'Release
 #
 # main -> DRAFT stable release, tag v<version>. Publishing the draft creates the
 #         tag, so the files are already there when it goes public.
-# dev  -> only by hand. Beta pre-release, tag v<version>-beta.<run number>, published at once
+# dev  -> only by hand. Beta pre-release, tag v<version>-beta.<n>, n counting up per version, published at once
 #         (the app's update check cannot see drafts) with the files attached.
 #         Pre-releases are never "latest", so only users who turned on beta
-#         updates are offered them. The run number is also built into the app
+#         updates are offered them. The number is also built into the app
 #         (LU_BETA_BUILD) so a beta knows which beta it is.
 on:
   push:
@@ -62,6 +62,8 @@ jobs:
     needs: version
     if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-22.04
+    outputs:
+      beta: ${{ steps.beta.outputs.n }}
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +76,17 @@ jobs:
             echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json (and package.json, src-tauri/Cargo.toml) on this branch first"
             exit 1
           fi
+
+      # Betas count up per version: v0.2.2-beta.1, .2, .3. The next number is one
+      # above the highest beta tag of this version already on the remote.
+      - name: Number this beta
+        id: beta
+        if: github.ref_name != 'main'
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          last=$(git ls-remote --tags origin "refs/tags/v$version-beta.*" \
+            | sed -n 's|.*-beta\.\([0-9]*\)$|\1|p' | sort -n | tail -1)
+          echo "n=$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -97,7 +110,7 @@ jobs:
       - run: npm run contract
       - run: npx tauri build
         env:
-          LU_BETA_BUILD: ${{ github.ref_name != 'main' && github.run_number || '' }}
+          LU_BETA_BUILD: ${{ steps.beta.outputs.n }}
 
       - name: Collect release files
         run: |
@@ -142,7 +155,7 @@ jobs:
       - run: scripts/smoke_test.sh "${{ matrix.distro }}" release
 
   release:
-    needs: smoke
+    needs: [build, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -159,6 +172,7 @@ jobs:
       - name: Create or refresh the release
         env:
           GH_TOKEN: ${{ github.token }}
+          BETA_NUMBER: ${{ needs.build.outputs.beta }}
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="v$version"
@@ -166,7 +180,7 @@ jobs:
           flags=(--draft)
           notes="Stable release. Checksums for every file are in SHA256SUMS."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
-            tag="v$version-beta.$GITHUB_RUN_NUMBER"
+            tag="v$version-beta.$BETA_NUMBER"
             title="$tag"
             flags=(--prerelease)  # published, not a draft: the app cannot see drafts
             # What is new in this beta is what CHANGELOG.md lists under [Unreleased].

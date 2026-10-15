@@ -29,7 +29,7 @@ const SUMS_NAME: &str = "SHA256SUMS";
 /// Largest download accepted: the AppImage is well under this.
 const MAX_DOWNLOAD: u64 = 1 << 30;
 const MAX_NOTES: usize = 20_000;
-/// Set by the dev-branch release build to its workflow run number; a stable
+/// Set by the dev-branch release build to its beta number; a stable
 /// build has none. It tells the update check which beta this copy is.
 const BETA_BUILD: Option<&str> = option_env!("LU_BETA_BUILD");
 /// Sorts a stable release above every beta of the same version.
