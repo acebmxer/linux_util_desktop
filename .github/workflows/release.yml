@@ -1,5 +1,7 @@
 name: Release
 
+run-name: ${{ inputs.description || github.event.head_commit.message || 'Release' }}
+
 # When the app version changes on main, or when started by hand (Actions ->
 # Release -> Run workflow, on main or dev): builds the
 # AppImage, .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and
@@ -19,6 +21,11 @@ on:
     branches: [main]
     paths: ["src-tauri/tauri.conf.json"]
   workflow_dispatch:
+    inputs:
+      description:
+        description: Title shown in the Actions run list (optional)
+        required: false
+        type: string
 
 permissions:
   contents: read
