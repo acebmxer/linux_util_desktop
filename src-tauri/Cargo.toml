@@ -20,3 +20,6 @@ tauri-plugin-dialog = "2"
 libc = "0.2"
 ureq = "3"
 sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"

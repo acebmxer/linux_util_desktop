@@ -200,6 +200,12 @@ pub fn askpass() -> ! {
 }
 
 pub fn run() {
+    // On Wayland, KDE finds the window's icon by matching its application ID to
+    // a .desktop file name. GTK uses the program name as the ID, and the
+    // package installs "Linux_Util Desktop.desktop", so the two have to match.
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("Linux_Util Desktop"));
+
     // WebKitGTK's DMA-BUF renderer crashes the window on some Wayland + NVIDIA
     // setups ("Error 71 (Protocol error) dispatching to Wayland display").
     // Respect an explicit setting from the user's environment.

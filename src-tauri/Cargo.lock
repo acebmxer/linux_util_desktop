@@ -1719,6 +1719,7 @@ dependencies = [
 name = "linux_util_desktop"
 version = "0.2.1"
 dependencies = [
+ "glib",
  "libc",
  "serde",
  "serde_json",

@@ -22,6 +22,9 @@ release is cut.
 
 - **App icon**: a terminal-prompt icon in a hexagon replaces the placeholder
   icon in the window, menu and packages.
+
+  On KDE Wayland the title bar showed a generic icon because the window's ID
+  did not match the installed `.desktop` file; it now does.
 - **Beta updates**: the Release workflow can now be started by hand on `dev`
   (Actions → Release → Run workflow); it publishes the AppImage,
   `.deb` and `.rpm` as a **beta** pre-release, tagged
