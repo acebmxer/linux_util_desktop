@@ -1,6 +1,6 @@
 [package]
 name = "linux_util_desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Desktop front end for linux_util"
 edition = "2021"
 license = "MIT"
@@ -20,3 +20,6 @@ tauri-plugin-dialog = "2"
 libc = "0.2"
 ureq = "3"
 sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"

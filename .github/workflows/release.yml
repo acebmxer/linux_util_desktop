@@ -1,27 +1,72 @@
 name: Release
 
-# When the app version changes on main (or on demand): builds the AppImage,
-# .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and Arch
-# containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS to a
-# DRAFT release for that version. Publishing the draft creates the tag, so the
-# files are already there when it goes public. Builds on Ubuntu 22.04 so the
-# AppImage needs no newer glibc than that.
+run-name: ${{ inputs.description || github.event.head_commit.message || 'Release' }}
+
+# When the app version changes on main, or when started by hand (Actions ->
+# Release -> Run workflow, on main or dev): builds the
+# AppImage, .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and
+# Arch containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS to
+# a release. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than
+# that.
+#
+# main -> DRAFT stable release, tag v<version>. Publishing the draft creates the
+#         tag, so the files are already there when it goes public.
+# dev  -> only by hand. Beta pre-release, tag v<version>-beta.<run number>, published at once
+#         (the app's update check cannot see drafts) with the files attached.
+#         Pre-releases are never "latest", so only users who turned on beta
+#         updates are offered them. The run number is also built into the app
+#         (LU_BETA_BUILD) so a beta knows which beta it is.
 on:
   push:
     branches: [main]
     paths: ["src-tauri/tauri.conf.json"]
   workflow_dispatch:
+    inputs:
+      description:
+        description: Title shown in the Actions run list (optional)
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  # The path filter fires on any edit to tauri.conf.json. A push only releases
+  # when the version itself changed; a manual run always goes ahead.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: check
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          now=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          changed=true
+          if [[ "$GITHUB_EVENT_NAME" == "push" && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            before=$(git show "$BEFORE:src-tauri/tauri.conf.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+            if [[ "$before" == "$now" ]]; then
+              echo "Version is still $now; tauri.conf.json changed for another reason. Not releasing."
+              changed=false
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Stop if this version is already released
+        if: github.ref_name == 'main'
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
@@ -50,6 +95,8 @@ jobs:
       - run: npm ci
       - run: npm run contract
       - run: npx tauri build
+        env:
+          LU_BETA_BUILD: ${{ github.ref_name != 'main' && github.run_number || '' }}
 
       - name: Collect release files
         run: |
@@ -99,28 +146,47 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Checkout first: on an empty workspace it clears the folder, which would
+      # delete files downloaded before it.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release
           path: release
 
-      - uses: actions/checkout@v4
-
-      - name: Create or refresh the draft release
+      - name: Create or refresh the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="v$version"
+          title="Linux_Util Desktop $tag (stable)"
+          flags=(--draft)
+          notes="Stable release. Checksums for every file are in SHA256SUMS."
+          if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+            tag="v$version-beta.$GITHUB_RUN_NUMBER"
+            title="$tag"
+            flags=(--prerelease)  # published, not a draft: the app cannot see drafts
+            # What is new in this beta is what CHANGELOG.md lists under [Unreleased].
+            unreleased=$(awk '/^## \[Unreleased\]/{f=1; next} /^## \[/{f=0} f' CHANGELOG.md)
+            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS." "$unreleased")
+          fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            if [[ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
+            # A beta is published on creation, so only a stable release is protected once public.
+            if [[ "$GITHUB_REF_NAME" == "main" && "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
               echo "::error::$tag is already published; not touching it"
               exit 1
+            fi
+            # The files are rebuilt from this commit, so the tag must point here too.
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
+            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes"
             fi
             gh release upload "$tag" release/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" release/* \
-              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
-              --title "Linux_Util Desktop $tag" \
-              --notes "Checksums for every file are in SHA256SUMS."
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "$title" "${flags[@]}" \
+              --notes "$notes"
           fi

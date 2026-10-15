@@ -26,7 +26,11 @@
       </div>
       <div id="body">
         <nav id="categories" aria-label="Categories" hidden></nav>
-        <ul id="list" aria-label="Utilities"></ul>
+        <div id="sidebarhandle" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" hidden></div>
+        <div id="main">
+          <ul id="list" aria-label="Utilities"></ul>
+          <div id="description" aria-label="Description" aria-live="polite"></div>
+        </div>
       </div>
       <section id="runpanel" aria-label="Run output" hidden>
         <div id="runhead">
@@ -39,6 +43,11 @@
         </div>
         <ol id="queue"></ol>
         <pre id="log" tabindex="0" aria-label="Output"></pre>
+        <form id="answer" hidden>
+          <input id="answertext" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Answer a prompt (for example y or n), then press Enter" aria-label="Answer" />
+          <button type="submit">Send</button>
+        </form>
       </section>
       <div id="actionbar">
         <span id="selcount" role="status"></span>
@@ -49,8 +58,6 @@
         <button id="do-install" type="button"></button>
         <button id="do-update" type="button"></button>
         <button id="do-uninstall" type="button"></button>
-        <span class="divider"></span>
-        <button id="do-updateall" type="button">Update all</button>
       </div>
       <p id="status" class="muted" role="status">Loading utilities…</p>
       <footer id="versions" class="muted">
@@ -70,6 +77,24 @@
             <button id="askok" type="submit" class="primary">Authenticate</button>
           </div>
         </form>
+      </dialog>
+      <dialog id="confirmremove" aria-labelledby="removetitle">
+        <h2 id="removetitle"></h2>
+        <p>Some uninstallers also delete the program's data, such as mail profiles, Wine prefixes or containers. This cannot be undone.</p>
+        <ul id="removelist"></ul>
+        <div class="buttons">
+          <button id="removecancel" type="button">Cancel</button>
+          <button id="removeok" type="button" class="primary"></button>
+        </div>
+      </dialog>
+      <dialog id="reboot" aria-labelledby="reboottitle">
+        <h2 id="reboottitle">Reboot needed</h2>
+        <p>A reboot is recommended to finish these changes. Save your work first.</p>
+        <p id="rebooterr" class="error"></p>
+        <div class="buttons">
+          <button id="rebootlater" type="button">Later</button>
+          <button id="rebootnow" type="button" class="primary">Reboot now</button>
+        </div>
       </dialog>
       <dialog id="update" aria-labelledby="updatetitle">
         <h2 id="updatetitle"></h2>
@@ -133,6 +158,13 @@
               <span>
                 Check for a newer version when the app starts
                 <small class="muted">Looks at this project's releases on GitHub. Nothing is downloaded until you click Install update.</small>
+              </span>
+            </label>
+            <label class="check">
+              <input id="betaupdates" type="checkbox" />
+              <span>
+                Include beta versions
+                <small class="muted">Offers test builds from the dev branch as well as stable releases. Turn it off to get stable releases only; a beta already installed stays until a newer stable release comes out.</small>
               </span>
             </label>
           </fieldset>

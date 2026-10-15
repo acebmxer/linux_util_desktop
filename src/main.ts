@@ -8,6 +8,7 @@ interface Utility {
   version: string | null;
   category?: string | null;
   subcategory?: string | null;
+  description?: string | null;
 }
 
 const SCHEMA = "linux_util/list/v1";
@@ -29,11 +30,29 @@ let updating = false;
 let cursor: string | null = null;
 type Op = "install" | "uninstall" | "update";
 
+// linux_util's menu order for categories and, per category, its subcategories
+// (the Rust side reads both from the bundled script). Names not listed come after.
+let categoryOrder: string[] = [];
+let subcategoryOrder: Record<string, string[]> = {};
+
+function byMenuOrder<T>(entries: [string, T][], order: string[]): [string, T][] {
+  const rank = (name: string) => {
+    const i = order.indexOf(name);
+    return i < 0 ? order.length : i;
+  };
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => rank(a.e[0]) - rank(b.e[0]) || a.i - b.i)
+    .map(({ e }) => e);
+}
+
 function parseList(raw: string): Utility[] {
   const doc = JSON.parse(raw);
   if (doc?.schema !== SCHEMA || !Array.isArray(doc.utilities)) {
     throw new Error(`Unexpected output from linux_util (expected ${SCHEMA})`);
   }
+  categoryOrder = Array.isArray(doc.category_order) ? doc.category_order : [];
+  subcategoryOrder = doc.subcategory_order && typeof doc.subcategory_order === "object" ? doc.subcategory_order : {};
   return doc.utilities as Utility[];
 }
 
@@ -43,6 +62,28 @@ function categoryOf(u: Utility): string {
 
 function isTask(u: Utility): boolean {
   return u.category === TASKS;
+}
+
+// linux_util's menu offers a reboot after any successful System Task, Docker or
+// Drivers item except these (its NO_REBOOT list in linux_util.sh). Keep in step.
+const NO_REBOOT = new Set([
+  "Create Snapshot",
+  "Restore Snapshot",
+  "Delete Snapshot",
+  "Local Time Zone / Locale",
+  "Mount Local Drive",
+  "Mount NFS Share",
+  "Mount SMB Share",
+  "Manage Share",
+  "Configure Syncthing Folders",
+  "Parallel Downloads",
+]);
+let rebootItems = new Set<string>();
+
+function rebootsAfter(name: string): boolean {
+  if (NO_REBOOT.has(name)) return false;
+  const u = utilities.find((x) => x.name === name);
+  return name === "Docker" || (u !== undefined && (isTask(u) || u.category === "Drivers"));
 }
 
 // System tasks change a setting rather than add software, so they are applied
@@ -67,7 +108,7 @@ function subOf(u: Utility): string {
 function matchesQuery(u: Utility): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [u.name, u.category, u.subcategory].some((s) => s?.toLowerCase().includes(q));
+  return [u.name, u.category, u.subcategory, u.description].some((s) => s?.toLowerCase().includes(q));
 }
 
 function matches(u: Utility): boolean {
@@ -82,6 +123,7 @@ function renderCategories() {
   const nav = $("categories");
   const hasCategories = utilities.some((u) => u.category);
   nav.hidden = !hasCategories;
+  $("sidebarhandle").hidden = !hasCategories;
   if (!hasCategories) return;
 
   // Counts follow the search; categories stay listed even at zero.
@@ -90,7 +132,7 @@ function renderCategories() {
   const found = utilities.filter(matchesQuery);
   for (const u of found) counts.set(categoryOf(u), (counts.get(categoryOf(u)) ?? 0) + 1);
 
-  const entries: [string, number][] = [[ALL, found.length], ...counts];
+  const entries: [string, number][] = [[ALL, found.length], ...byMenuOrder([...counts], categoryOrder)];
   const navButton = (label: string, count: number, current: boolean, sub: boolean, onClick: () => void) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -98,6 +140,7 @@ function renderCategories() {
     button.setAttribute("aria-current", String(current));
     const text = document.createElement("span");
     text.textContent = label;
+    text.title = label;
     const n = document.createElement("span");
     n.className = "muted";
     n.textContent = String(count);
@@ -122,7 +165,7 @@ function renderCategories() {
       subs.set(subOf(u), (subs.get(subOf(u)) ?? 0) + 1);
     }
     if (subs.size < 2) continue;
-    for (const [sub, n] of subs) {
+    for (const [sub, n] of byMenuOrder([...subs], subcategoryOrder[name] ?? [])) {
       buttons.push(
         navButton(sub, n, selectedSub === sub, true, () => {
           selectedSub = sub;
@@ -146,6 +189,7 @@ function row(u: Utility, showSub: boolean): HTMLLIElement {
   box.tabIndex = u.name === cursor ? 0 : -1;
   box.addEventListener("focus", () => {
     cursor = u.name;
+    showDescription(u.name);
     for (const other of listBoxes()) other.tabIndex = other === box ? 0 : -1;
   });
   box.addEventListener("change", () => {
@@ -159,6 +203,7 @@ function row(u: Utility, showSub: boolean): HTMLLIElement {
   name.className = "name";
   name.textContent = u.name;
   li.append(box, name);
+  li.addEventListener("mouseenter", () => showDescription(u.name));
   if (showSub && u.subcategory) {
     const sub = document.createElement("span");
     sub.className = "sub";
@@ -184,8 +229,9 @@ function renderList() {
   const shown = utilities.filter(matches);
   $("count").textContent = `${shown.length} of ${utilities.length} utilities`;
   // Inside one category the list is grouped under its subcategories.
-  const groups = new Map<string, Utility[]>();
-  for (const u of shown) groups.set(subOf(u), [...(groups.get(subOf(u)) ?? []), u]);
+  const unordered = new Map<string, Utility[]>();
+  for (const u of shown) unordered.set(subOf(u), [...(unordered.get(subOf(u)) ?? []), u]);
+  const groups = new Map(byMenuOrder([...unordered], subcategoryOrder[selected] ?? []));
   const grouped = selected !== ALL && selectedSub === null && groups.size > 1;
   const items: HTMLElement[] = [];
   if (grouped) {
@@ -208,7 +254,15 @@ function renderList() {
     cursor = current.dataset.name ?? null;
     if (hadFocus) current.focus();
   }
+  showDescription(cursor);
   $("status").textContent = shown.length === 0 ? "No utilities match." : "";
+}
+
+// The panel under the list shows the description of the highlighted utility,
+// as linux_util's menu does.
+function showDescription(name: string | null) {
+  const u = utilities.find((x) => x.name === name);
+  $("description").textContent = u?.description ?? "";
 }
 
 function listBoxes(): HTMLInputElement[] {
@@ -242,7 +296,6 @@ function renderActionBar() {
   $<HTMLButtonElement>("clearsel").disabled = running;
   $<HTMLButtonElement>("openprofiles").disabled = running || !loaded;
   $<HTMLButtonElement>("opensettings").disabled = running;
-  $<HTMLButtonElement>("do-updateall").disabled = running || !utilities.some((u) => u.installed);
 }
 
 // ---- running actions ----
@@ -250,20 +303,42 @@ function renderActionBar() {
 const logEl = () => $<HTMLPreElement>("log");
 let logText = "";
 
-function appendLog(text: string, stderr = false) {
-  logText += text + "\n";
-  const line = document.createElement("div");
-  if (stderr) line.className = "err";
-  line.textContent = text;
+// A line still waiting for its newline, per stream (e.g. a "[y/N]" prompt).
+// The next output on that stream replaces its text.
+const partialLines = new Map<boolean, HTMLDivElement>();
+
+function appendLog(text: string, stderr = false, partial = false, error = stderr) {
   const pre = logEl();
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
-  pre.append(line);
+  let line = partialLines.get(stderr);
+  if (!line) {
+    line = document.createElement("div");
+    if (error) line.className = "err";
+    pre.append(line);
+  }
+  line.textContent = text;
+  if (partial) partialLines.set(stderr, line);
+  else {
+    partialLines.delete(stderr);
+    logText += text + "\n";
+  }
   if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+// Shows a typed answer the way a terminal echoes it: after the prompt it answers.
+function echoAnswer(text: string) {
+  const prompt = partialLines.get(false) ?? partialLines.get(true);
+  partialLines.clear();
+  if (prompt) {
+    prompt.textContent += text;
+    logText += prompt.textContent + "\n";
+  } else appendLog(text);
 }
 
 function setRunning(value: boolean) {
   running = value;
   $<HTMLButtonElement>("cancel").hidden = !value;
+  $<HTMLFormElement>("answer").hidden = !value;
   $<HTMLButtonElement>("closerun").hidden = value;
   $<HTMLButtonElement>("copylog").hidden = false;
   render();
@@ -272,16 +347,33 @@ function setRunning(value: boolean) {
 async function start(op: Op) {
   const names = pickedWhere(op === "install" ? false : true);
   if (!names.length || running) return;
+  if (op === "uninstall" && !$<HTMLInputElement>("dryrun").checked) {
+    confirmRemove(names);
+    return;
+  }
   await launch(op, names, opLabel(op, names));
 }
 
-// One `linux_util.sh --update-all` run: it decides itself what is installed.
-async function startUpdateAll() {
-  if (running) return;
-  await launch("update-all", ["All installed utilities"], "Update all");
+// Uninstalling can delete a program's data, so a real (not dry) run asks first.
+let removeNames: string[] = [];
+
+function confirmRemove(names: string[]) {
+  removeNames = names;
+  const label = opLabel("uninstall", names);
+  $("removetitle").textContent = `${label} ${names.length === 1 ? names[0] : `${names.length} utilities`}?`;
+  $("removelist").replaceChildren(
+    ...names.map((n) => {
+      const li = document.createElement("li");
+      li.textContent = n;
+      return li;
+    }),
+  );
+  $("removeok").textContent = label;
+  $<HTMLDialogElement>("confirmremove").showModal();
+  $("removecancel").focus();
 }
 
-async function launch(op: Op | "update-all", names: string[], title: string) {
+async function launch(op: Op, names: string[], title: string) {
   const dryRun = $<HTMLInputElement>("dryrun").checked;
   await openRun(`${title}${dryRun ? " (dry run)" : ""}`, names, () => invoke("run_action", { op, names, dryRun }));
 }
@@ -289,6 +381,8 @@ async function launch(op: Op | "update-all", names: string[], title: string) {
 // Shows the run panel with one queue entry per name, then starts the run.
 async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
   logText = "";
+  rebootItems = new Set();
+  partialLines.clear();
   logEl().replaceChildren();
   $("runtitle").textContent = title;
   $("runsummary").textContent = "";
@@ -328,13 +422,29 @@ function setAskBusy(busy: boolean) {
 for (const op of ["install", "update", "uninstall"] as Op[]) {
   $(`do-${op}`).addEventListener("click", () => start(op));
 }
-$("do-updateall").addEventListener("click", startUpdateAll);
+$("removecancel").addEventListener("click", () => $<HTMLDialogElement>("confirmremove").close());
+$("removeok").addEventListener("click", () => {
+  $<HTMLDialogElement>("confirmremove").close();
+  if (removeNames.length && !running) launch("uninstall", removeNames, opLabel("uninstall", removeNames));
+});
 $("clearsel").addEventListener("click", () => {
   picked.clear();
   $("selnote").textContent = "";
   render();
 });
 $("cancel").addEventListener("click", () => invoke("cancel_run"));
+$<HTMLFormElement>("answer").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const input = $<HTMLInputElement>("answertext");
+  const text = input.value;
+  input.value = "";
+  try {
+    await invoke("send_input", { text });
+    echoAnswer(text);
+  } catch (e) {
+    appendLog(String(e), true);
+  }
+});
 $("closerun").addEventListener("click", () => ($("runpanel").hidden = true));
 $("copylog").addEventListener("click", async () => {
   const button = $("copylog");
@@ -359,7 +469,9 @@ $<HTMLDialogElement>("askpass").addEventListener("cancel", (ev) => {
   stopAsking(null);
 });
 
-listen<{ text: string; stderr: boolean }>("run-output", (ev) => appendLog(ev.payload.text));
+listen<{ text: string; stderr: boolean; error: boolean; partial: boolean }>("run-output", (ev) =>
+  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial, ev.payload.error),
+);
 listen<{ index: number; name: string; state: string; code: number | null }>("run-item", (ev) => {
   const { index, name, state, code } = ev.payload;
   const li = $("queue").children[index] as HTMLElement | undefined;
@@ -368,7 +480,10 @@ listen<{ index: number; name: string; state: string; code: number | null }>("run
     li.textContent = state === "failed" && code !== null ? `${name} (exit ${code})` : name;
   }
   if (state === "running") appendLog(`--- ${name} ---`);
-  else if (state === "ok") appendLog(`--- ${name}: finished ---`);
+  else if (state === "ok") {
+    if (code !== 3 && rebootsAfter(name)) rebootItems.add(name);
+    appendLog(`--- ${name}: finished ---`);
+  }
   else if (state === "failed") appendLog(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, true);
   else appendLog(`--- ${name}: cancelled ---`);
 });
@@ -393,6 +508,36 @@ listen<{ ok: number; failed: number; cancelled: boolean }>("run-done", (ev) => {
   $("selnote").textContent = "";
   setRunning(false);
   load();
+  if (ok > 0 && !cancelled) offerReboot();
+});
+
+// Same offer linux_util's menu makes at the end of a run: after a System Task,
+// Docker or Drivers item, or when the system says a reboot is pending.
+async function offerReboot() {
+  if (rebootItems.size === 0) {
+    try {
+      if (!(await invoke<boolean>("reboot_needed"))) return;
+    } catch {
+      return;
+    }
+  }
+  $("rebooterr").textContent = "";
+  const dialog = $<HTMLDialogElement>("reboot");
+  if (!dialog.open) dialog.showModal();
+  $("rebootlater").focus();
+}
+
+$("rebootlater").addEventListener("click", () => {
+  invoke("forget_password").catch(() => {});
+  $<HTMLDialogElement>("reboot").close();
+});
+$("rebootnow").addEventListener("click", async () => {
+  try {
+    await invoke("reboot_now");
+    $<HTMLDialogElement>("reboot").close();
+  } catch (e) {
+    $("rebooterr").textContent = String(e);
+  }
 });
 
 // ---- profiles ----
@@ -610,6 +755,7 @@ type Theme = "system" | "light" | "dark";
 interface Settings {
   theme: Theme;
   check_updates: boolean;
+  beta_updates: boolean;
   linux_util: Record<string, string>;
 }
 
@@ -630,7 +776,7 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
   { key: "max_logs_per_day", label: "Most logs kept per day", help: "The oldest of a day's logs beyond this are deleted.", kind: "int", def: "15" },
 ];
 
-let settings: Settings = { theme: "system", check_updates: true, linux_util: {} };
+let settings: Settings = { theme: "system", check_updates: true, beta_updates: false, linux_util: {} };
 
 function applyTheme(theme: Theme) {
   if (theme === "system") delete document.documentElement.dataset.theme;
@@ -640,6 +786,7 @@ function applyTheme(theme: Theme) {
 function fillSettings(s: Settings) {
   $<HTMLSelectElement>("theme").value = s.theme;
   $<HTMLInputElement>("checkupdates").checked = s.check_updates;
+  $<HTMLInputElement>("betaupdates").checked = s.beta_updates;
   const fields = LU_FIELDS.map((f) => {
     const value = s.linux_util[f.key] ?? f.def;
     const label = document.createElement("label");
@@ -681,6 +828,7 @@ function readSettings(): Settings {
   return {
     theme: $<HTMLSelectElement>("theme").value as Theme,
     check_updates: $<HTMLInputElement>("checkupdates").checked,
+    beta_updates: $<HTMLInputElement>("betaupdates").checked,
     linux_util,
   };
 }
@@ -690,7 +838,7 @@ $("opensettings").addEventListener("click", () => {
   fillSettings(settings);
   $<HTMLDialogElement>("settings").showModal();
 });
-$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, linux_util: {} }));
+$("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, beta_updates: false, linux_util: {} }));
 $("settingscancel").addEventListener("click", () => $<HTMLDialogElement>("settings").close());
 $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -857,7 +1005,7 @@ document.addEventListener("keydown", (ev) => {
       return;
     case "ArrowLeft":
     case "ArrowRight":
-      if (!inList) return;
+      if (!inList && target !== document.body) return;
       ev.preventDefault();
       moveCategory(ev.key === "ArrowRight" ? 1 : -1);
       return;
@@ -897,6 +1045,61 @@ $<HTMLInputElement>("search").addEventListener("input", (ev) => {
   query = (ev.target as HTMLInputElement).value;
   if (loaded) render();
 });
+
+// ---- sidebar width ----
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 600;
+
+function setSidebarWidth(px: number): number {
+  const width = Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, px)));
+  $("categories").style.width = `${width}px`;
+  return width;
+}
+
+function saveSidebarWidth() {
+  const width = Math.round($("categories").getBoundingClientRect().width);
+  invoke("set_sidebar_width", { width }).catch(() => {});
+}
+
+(() => {
+  const handle = $("sidebarhandle");
+  // Without this, the press starts a text selection that the drag then extends.
+  handle.addEventListener("mousedown", (ev) => ev.preventDefault());
+  handle.addEventListener("pointerdown", (ev) => {
+    window.getSelection()?.removeAllRanges();
+    handle.setPointerCapture(ev.pointerId);
+    handle.classList.add("dragging");
+    document.body.style.userSelect = "none";
+  });
+  handle.addEventListener("pointermove", (ev) => {
+    if (!handle.hasPointerCapture(ev.pointerId)) return;
+    setSidebarWidth(ev.clientX - $("categories").getBoundingClientRect().left);
+  });
+  const end = (ev: PointerEvent) => {
+    if (!handle.hasPointerCapture(ev.pointerId)) return;
+    handle.releasePointerCapture(ev.pointerId);
+    handle.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    saveSidebarWidth();
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+  handle.addEventListener("keydown", (ev) => {
+    const step = ev.key === "ArrowLeft" ? -16 : ev.key === "ArrowRight" ? 16 : 0;
+    if (!step) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    setSidebarWidth($("categories").getBoundingClientRect().width + step);
+    saveSidebarWidth();
+  });
+  handle.addEventListener("dblclick", () => {
+    $("categories").style.width = "";
+    saveSidebarWidth();
+  });
+  invoke<number | null>("get_sidebar_width").then((w) => {
+    if (w) setSidebarWidth(w);
+  });
+})();
 
 invoke<Settings>("get_settings").then((s) => {
   settings = s;

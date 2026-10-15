@@ -51,6 +51,9 @@ Notes:
 - The script creates `logs/` next to itself on every run, including `--list`.
   It still exits 0 when that directory is read-only, but prints errors to stderr.
 - Each utility has `category` and `subcategory` (strings, `null` when absent; system tasks are category "System Tasks").
+- The JSON carries no category order. The app reads the menu's `CATEGORIES=(...)`
+  and `SUBCATEGORY_ORDER["Category"]="A|B"` lines from `lib/installers.sh` and
+  adds them as `category_order` / `subcategory_order` (names not listed go last).
 
 ## `--export-profile <file>`
 

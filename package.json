@@ -1,12 +1,12 @@
 {
   "name": "linux-util-desktop",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.mjs",
     "contract": "node scripts/contract_test.mjs"
   },
   "devDependencies": {

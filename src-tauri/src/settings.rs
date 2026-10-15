@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager};
 const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 /// The linux_util config keys the app offers: only those its `--install`,
-/// `--uninstall`, `--update` and `--update-all` runs actually read. The rest
+/// `--uninstall` and `--update` runs actually read. The rest
 /// (retries, pre-flight checks) belong to the terminal menu.
 const KEYS: [(&str, Kind); 5] = [
     ("auto_confirm", Kind::Bool),
@@ -37,6 +37,9 @@ pub struct Settings {
     /// Look for a newer release of the app on launch.
     #[serde(default = "default_true")]
     check_updates: bool,
+    /// Offer beta pre-releases (built from the dev branch) as updates.
+    #[serde(default)]
+    beta_updates: bool,
     /// linux_util config keys changed from their defaults.
     #[serde(default)]
     linux_util: BTreeMap<String, String>,
@@ -52,7 +55,7 @@ fn default_true() -> bool {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: default_theme(), check_updates: true, linux_util: BTreeMap::new() }
+        Settings { theme: default_theme(), check_updates: true, beta_updates: false, linux_util: BTreeMap::new() }
     }
 }
 
@@ -108,6 +111,11 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
+/// Whether updates come from the beta channel.
+pub(crate) fn beta_updates(app: &AppHandle) -> bool {
+    get_settings(app.clone()).beta_updates
+}
+
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Settings {
     let Ok(dir) = config_dir(&app) else { return Settings::default() };
@@ -145,6 +153,7 @@ mod tests {
         Settings {
             theme: "dark".into(),
             check_updates: true,
+            beta_updates: false,
             linux_util: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         }
     }
@@ -169,6 +178,7 @@ mod tests {
     fn older_settings_files_still_load() {
         let s: Settings = serde_json::from_str(r#"{"theme": "dark", "linux_util": {}}"#).unwrap();
         assert!(s.check_updates);
+        assert!(!s.beta_updates);
         assert!(s.validate().is_ok());
     }
 
