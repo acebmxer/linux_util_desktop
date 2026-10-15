@@ -240,6 +240,15 @@ pub fn askpass() -> ! {
     actions::askpass_client()
 }
 
+/// True when running inside WSL (WSL 1 and 2 both set `WSL_DISTRO_NAME`).
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|v| v.to_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
 pub fn run() {
     // On Wayland, KDE finds the window's icon by matching its application ID to
     // a .desktop file name. GTK uses the program name as the ID, and the
@@ -252,6 +261,18 @@ pub fn run() {
     // Respect an explicit setting from the user's environment.
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
+    // Under WSLg, WebKitGTK crashes (segmentation fault) when it renders through
+    // the "dzn" Vulkan-over-DirectX driver, so on WSL render in software.
+    // Respect explicit settings from the user's environment.
+    #[cfg(target_os = "linux")]
+    if is_wsl() {
+        for var in ["LIBGL_ALWAYS_SOFTWARE", "WEBKIT_DISABLE_COMPOSITING_MODE"] {
+            if std::env::var_os(var).is_none() {
+                std::env::set_var(var, "1");
+            }
+        }
     }
 
     tauri::Builder::default()

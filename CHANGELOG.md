@@ -11,6 +11,13 @@ release is cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The app crashed on start under WSL.** WebKit segfaulted on WSLg's `dzn`
+  graphics driver, so nothing opened from the terminal or the Windows Start
+  menu. On WSL the app now renders in software, unless `LIBGL_ALWAYS_SOFTWARE`
+  or `WEBKIT_DISABLE_COMPOSITING_MODE` is already set in the environment.
+
 ## [0.2.1] - 2026-10-15
 
 ### Added
