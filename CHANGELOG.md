@@ -13,6 +13,9 @@ release is cut.
 
 ### Fixed
 
+- **Reboot now asked for the password a second time.** It ran `systemctl reboot`
+  as the user, so the desktop's own prompt appeared. It now reuses the sudo
+  password given for the run, held in memory only until the reboot offer ends.
 - **Run output was red** for everything the script wrote to stderr, including
   dnf's normal progress. Only the app's own errors are red now; the script's
   output shows plain, as in a terminal.

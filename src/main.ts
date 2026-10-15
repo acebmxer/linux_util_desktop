@@ -507,7 +507,10 @@ async function offerReboot() {
   $("rebootlater").focus();
 }
 
-$("rebootlater").addEventListener("click", () => $<HTMLDialogElement>("reboot").close());
+$("rebootlater").addEventListener("click", () => {
+  invoke("forget_password").catch(() => {});
+  $<HTMLDialogElement>("reboot").close();
+});
 $("rebootnow").addEventListener("click", async () => {
   try {
     await invoke("reboot_now");

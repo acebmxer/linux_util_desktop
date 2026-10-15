@@ -39,6 +39,9 @@ struct Inner {
     stdin: Option<ChildStdin>,
     /// Output received after the last newline, per stream; see `pump`.
     pending: Vec<Arc<Mutex<Vec<u8>>>>,
+    /// The sudo password the last run was given, kept in memory only so the
+    /// reboot offer after it does not ask again. Dropped when that offer ends.
+    sudo_password: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -251,7 +254,12 @@ struct Credentials {
     denied: bool,
 }
 
-fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, stop: Arc<AtomicBool>) {
+fn serve_askpass(
+    app: AppHandle,
+    listener: UnixListener,
+    real_sudo: PathBuf,
+    stop: Arc<AtomicBool>,
+) -> Option<String> {
     let mut creds = Credentials::default();
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::SeqCst) {
@@ -292,6 +300,7 @@ fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, sto
             let _ = stream.write_all(pw.as_bytes());
         }
     }
+    creds.password
 }
 
 /// Copies `from` into `to`, leaving out top-level entries named in `skip`.
@@ -467,6 +476,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             return;
         }
     };
+    state.inner.lock().unwrap().sudo_password = None;
     let stop = Arc::new(AtomicBool::new(false));
     let server = UnixListener::bind(work.socket_path()).ok().map(|listener| {
         let (app, stop, sudo) = (app.clone(), stop.clone(), real_sudo.clone());
@@ -548,8 +558,8 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     }
 
     stop.store(true, Ordering::SeqCst);
-    if let Some(s) = server {
-        let _ = s.join();
+    if let Some(Ok(password)) = server.map(|s| s.join()) {
+        state.inner.lock().unwrap().sudo_password = password;
     }
     let cancelled = state.inner.lock().unwrap().cancelled;
     let _ = app.emit("run-done", Done { ok, failed, cancelled });
@@ -629,18 +639,44 @@ pub fn reboot_needed() -> bool {
     matches!(cmd.status(), Ok(s) if !s.success())
 }
 
-/// Reboots the machine. Runs as the signed-in user; logind allows that for the
-/// active local session without a password.
+/// Reboots the machine. With the sudo password the last run was given it
+/// uses `sudo`, so no second prompt appears; otherwise it runs `systemctl
+/// reboot` as the signed-in user and the desktop's own policy decides.
 #[tauri::command]
-pub fn reboot_now() -> Result<(), String> {
-    let mut cmd = Command::new("systemctl");
+pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
+    let password = state.inner.lock().unwrap().sudo_password.take();
+    let mut cmd;
+    match (&password, find_in_path("sudo")) {
+        (Some(_), Some(sudo)) => {
+            cmd = Command::new(sudo);
+            cmd.args(["-S", "-k", "-p", "", "systemctl", "reboot"]).stdin(Stdio::piped());
+        }
+        _ => {
+            cmd = Command::new("systemctl");
+            cmd.arg("reboot");
+        }
+    }
     crate::use_host_env(&mut cmd);
-    let out = cmd.arg("reboot").output().map_err(|e| format!("Could not run systemctl: {e}"))?;
+    let mut child = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run the reboot command: {e}"))?;
+    if let (Some(pw), Some(mut stdin)) = (password, child.stdin.take()) {
+        let _ = writeln!(stdin, "{pw}");
+    }
+    let out = child.wait_with_output().map_err(|e| format!("Reboot failed: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// Drops the remembered sudo password when the reboot offer is dismissed.
+#[tauri::command]
+pub fn forget_password(state: State<'_, RunState>) {
+    state.inner.lock().unwrap().sudo_password = None;
 }
 
 /// Sends one line typed in the run panel to the running script's stdin. The

@@ -225,6 +225,7 @@ pub fn run() {
             actions::send_input,
             actions::reboot_needed,
             actions::reboot_now,
+            actions::forget_password,
             profiles::list_profiles,
             profiles::import_profile,
             profiles::export_profile,
