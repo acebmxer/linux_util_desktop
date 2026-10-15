@@ -13,6 +13,13 @@ release is cut.
 
 ### Fixed
 
+- **Reboot now failed on systems with passwordless sudo.** The reboot used
+  `sudo` only when a password had been collected during the run, and with
+  passwordless sudo none ever is. It then fell back to `systemctl reboot` as the
+  user, which needs a desktop authentication agent and is denied where there is
+  none, such as Fedora on WSL ("Interactive authentication has not been
+  enabled"). It now tries `sudo` first, without a password when none was given,
+  and only falls back to plain `systemctl reboot` if that fails.
 - **The app crashed on start under WSL.** WebKit segfaulted on WSLg's `dzn`
   graphics driver, so nothing opened from the terminal or the Windows Start
   menu. On WSL the app now renders in software, unless `LIBGL_ALWAYS_SOFTWARE`

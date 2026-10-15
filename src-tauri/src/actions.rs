@@ -639,25 +639,18 @@ pub fn reboot_needed() -> bool {
     matches!(cmd.status(), Ok(s) if !s.success())
 }
 
-/// Reboots the machine. With the sudo password the last run was given it
-/// uses `sudo`, so no second prompt appears; otherwise it runs `systemctl
-/// reboot` as the signed-in user and the desktop's own policy decides.
-#[tauri::command]
-pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
-    let password = state.inner.lock().unwrap().sudo_password.take();
-    let mut cmd;
-    match (&password, find_in_path("sudo")) {
-        (Some(_), Some(sudo)) => {
-            cmd = Command::new(sudo);
-            cmd.args(["-S", "-k", "-p", "", "systemctl", "reboot"]).stdin(Stdio::piped());
-        }
-        _ => {
-            cmd = Command::new("systemctl");
-            cmd.arg("reboot");
-        }
-    }
+/// Runs `systemctl reboot` through `sudo`, feeding it `password` when given and
+/// otherwise running with `-n` so it never waits for one. Err carries sudo's
+/// stderr, or why it could not be started.
+fn reboot_with_sudo(sudo: PathBuf, password: Option<&str>) -> Result<(), String> {
+    let mut cmd = Command::new(sudo);
+    match password {
+        Some(_) => cmd.args(["-S", "-k", "-p", "", "systemctl", "reboot"]),
+        None => cmd.args(["-n", "systemctl", "reboot"]),
+    };
     crate::use_host_env(&mut cmd);
     let mut child = cmd
+        .stdin(if password.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -666,6 +659,34 @@ pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
         let _ = writeln!(stdin, "{pw}");
     }
     let out = child.wait_with_output().map_err(|e| format!("Reboot failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Reboots the machine. With `sudo` available it uses it: with the password
+/// the last run was given, or, when none was needed (passwordless sudo), with
+/// `-n`. Only when that fails, or there is no `sudo`, does it run `systemctl
+/// reboot` as the signed-in user and let the desktop's own policy decide; that
+/// is denied where there is no polkit agent, such as WSL.
+#[tauri::command]
+pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
+    let password = state.inner.lock().unwrap().sudo_password.take();
+    if let Some(sudo) = find_in_path("sudo") {
+        if reboot_with_sudo(sudo, password.as_deref()).is_ok() {
+            return Ok(());
+        }
+    }
+    let mut cmd = Command::new("systemctl");
+    cmd.arg("reboot");
+    crate::use_host_env(&mut cmd);
+    let out = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Could not run the reboot command: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
