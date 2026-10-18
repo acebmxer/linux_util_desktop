@@ -18,6 +18,11 @@ release is cut.
   the app's scripts did not have, so the install failed with "No such device or
   address". Each script now runs on its own pseudo-terminal, so those prompts
   appear in the run panel and take your typed answer, as in a terminal.
+
+  An item that left a process running in the background, such as the NVIDIA
+  install on Fedora, then stayed "running" with no question asked, because the
+  app waited for that process to let go of the terminal. The item now ends two
+  seconds after the script itself exits.
 - **Reboot now failed on systems with passwordless sudo.** The reboot used
   `sudo` only when a password had been collected during the run, and with
   passwordless sudo none ever is. It then fell back to `systemctl reboot` as the

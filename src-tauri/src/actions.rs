@@ -428,6 +428,12 @@ pub(crate) fn clean_line(raw: &[u8]) -> String {
 /// code into exit 1, so the line is how the app tells that case from a failure.
 const NO_CHANGES_LINE: &str = "No package changes were made.";
 
+/// How long output is still read after the script itself has exited. A process
+/// it left running in the background keeps the pipes and terminal open for as
+/// long as it lives, and the item must not stay "running" until then: in a
+/// terminal, linux_util's menu carries on in the same case.
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
+
 /// Sends `reader`'s output to the UI a line at a time. Text left after the
 /// last newline is also sent, as a partial line, so a prompt that waits for an
 /// answer without ending its line is visible before the answer is typed.
@@ -437,8 +443,11 @@ fn pump<R: Read + Send + 'static>(
     stderr: bool,
     pending: Arc<Mutex<Vec<u8>>>,
     no_changes: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
+    done: mpsc::Sender<()>,
+    detached: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
+        let _done = done;
         let mut chunk = [0u8; 4096];
         loop {
             let n = match reader.read(&mut chunk) {
@@ -447,6 +456,11 @@ fn pump<R: Read + Send + 'static>(
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             };
+            // Past the grace period the item has ended; keep reading so the
+            // leftover process never blocks on a full pipe, but show nothing.
+            if detached.load(Ordering::SeqCst) {
+                continue;
+            }
             let mut pending = pending.lock().unwrap();
             pending.extend_from_slice(&chunk[..n]);
             while let Some(end) = pending.iter().position(|&b| b == b'\n') {
@@ -463,12 +477,18 @@ fn pump<R: Read + Send + 'static>(
             }
         }
         let mut pending = pending.lock().unwrap();
-        if !pending.is_empty() {
+        if !pending.is_empty() && !detached.load(Ordering::SeqCst) {
             let text = clean_line(&pending);
             pending.clear();
             let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: false });
         }
-    })
+    });
+}
+
+/// Waits until every output reader has ended or `grace` has passed, and says
+/// which. Each reader holds a sender, so the channel disconnects once all end.
+fn wait_for_readers(done: &mpsc::Receiver<()>, grace: Duration) -> bool {
+    matches!(done.recv_timeout(grace), Err(mpsc::RecvTimeoutError::Disconnected))
 }
 
 /// Tells the UI a line of output. `stderr` lines show in the error colour.
@@ -580,34 +600,35 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             });
             inner.pending = pending.to_vec();
         }
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let detached = Arc::new(AtomicBool::new(false));
         // Drain what the script writes to its terminal (nothing normally) so it
         // never blocks; reading ends with EIO once the script and its children exit.
-        let drain = pty.map(|Pty { master, slave }| {
+        if let Some(Pty { master, slave }) = pty {
             drop(slave);
+            let done = done_tx.clone();
             std::thread::spawn(move || {
+                let _done = done;
                 let mut master = master;
                 let mut buf = [0u8; 1024];
                 while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
-            })
-        });
+            });
+        }
         let [out_pending, err_pending] = pending;
         let no_changes = Arc::new(AtomicBool::new(false));
-        let readers = [
-            pump(app.clone(), child.stdout.take().unwrap(), false, out_pending, no_changes.clone()),
-            pump(app.clone(), child.stderr.take().unwrap(), true, err_pending, no_changes.clone()),
-        ];
+        pump(app.clone(), child.stdout.take().unwrap(), false, out_pending, no_changes.clone(), done_tx.clone(), detached.clone());
+        pump(app.clone(), child.stderr.take().unwrap(), true, err_pending, no_changes.clone(), done_tx.clone(), detached.clone());
+        drop(done_tx);
         let status = child.wait();
         {
             let mut inner = state.inner.lock().unwrap();
             inner.stdin = None; // closing it lets a child left reading stdin see EOF
             inner.pending.clear();
         }
-        for r in readers {
-            let _ = r.join();
-        }
-        if let Some(d) = drain {
-            let _ = d.join();
-        }
+        // Readers still going after this belong to a background process the
+        // script left behind; they carry on, detached, until it closes them.
+        wait_for_readers(&done_rx, OUTPUT_GRACE);
+        detached.store(true, Ordering::SeqCst);
         let cancelled = {
             let mut inner = state.inner.lock().unwrap();
             inner.pid = None;
@@ -883,5 +904,63 @@ mod tests {
         let out = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "got:y");
         assert!(out.status.success());
+    }
+
+    /// A script that exits leaving a background process on its terminal and
+    /// output (as a driver install's module build can) does not hold the run:
+    /// the readers are given up on after the grace period.
+    #[test]
+    fn background_process_does_not_hold_the_run() {
+        let pty = Pty::open().unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "sleep 30 & echo $!"])
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().unwrap();
+        let Pty { master, slave } = pty;
+        drop(slave);
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (line_tx, line_rx) = mpsc::channel::<String>();
+        let mut stdout = child.stdout.take().unwrap();
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            let _done = done;
+            let mut text = String::new();
+            let mut buf = [0u8; 64];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if text.ends_with('\n') {
+                    let _ = line_tx.send(text.trim().to_string());
+                }
+            }
+        });
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            let _done = done;
+            let mut master = master;
+            let mut buf = [0u8; 64];
+            while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        drop(done_tx);
+        assert!(child.wait().unwrap().success());
+        let started = std::time::Instant::now();
+        let all_ended = wait_for_readers(&done_rx, Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        let sleeper: i32 = line_rx.recv_timeout(Duration::from_secs(1)).unwrap().parse().unwrap();
+        unsafe { libc::kill(sleeper, libc::SIGKILL) };
+        assert!(!all_ended, "the background sleep should still hold the output");
+        assert!(elapsed < Duration::from_secs(2), "waited {elapsed:?}");
     }
 }
