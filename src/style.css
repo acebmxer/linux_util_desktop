@@ -11,6 +11,11 @@
   --ok-text: #166534;
   --fail-bg: #fee2e2;
   --fail-text: #991b1b;
+  /* Terminal colours 0-15 for the run output, readable on --panel. */
+  --t0: #1c1e21; --t1: #b91c1c; --t2: #15803d; --t3: #a16207;
+  --t4: #1d4ed8; --t5: #a21caf; --t6: #0e7490; --t7: #6b7280;
+  --t8: #6b7280; --t9: #dc2626; --t10: #16a34a; --t11: #ca8a04;
+  --t12: #2563eb; --t13: #c026d3; --t14: #0891b2; --t15: #374151;
   font-family: system-ui, sans-serif;
   font-size: 14px;
 }
@@ -30,6 +35,10 @@
     --ok-text: #bbf7d0;
     --fail-bg: #7f1d1d;
     --fail-text: #fecaca;
+    --t0: #9aa0aa; --t1: #f87171; --t2: #4ade80; --t3: #facc15;
+    --t4: #60a5fa; --t5: #e879f9; --t6: #22d3ee; --t7: #e6e7ea;
+    --t8: #9aa0aa; --t9: #fca5a5; --t10: #86efac; --t11: #fde047;
+    --t12: #93c5fd; --t13: #f0abfc; --t14: #67e8f9; --t15: #ffffff;
   }
 }
 :root[data-theme="light"] { color-scheme: light; }
@@ -46,6 +55,10 @@
   --ok-text: #bbf7d0;
   --fail-bg: #7f1d1d;
   --fail-text: #fecaca;
+  --t0: #9aa0aa; --t1: #f87171; --t2: #4ade80; --t3: #facc15;
+  --t4: #60a5fa; --t5: #e879f9; --t6: #22d3ee; --t7: #e6e7ea;
+  --t8: #9aa0aa; --t9: #fca5a5; --t10: #86efac; --t11: #fde047;
+  --t12: #93c5fd; --t13: #f0abfc; --t14: #67e8f9; --t15: #ffffff;
 }
 
 * { box-sizing: border-box; }
@@ -239,10 +252,47 @@ button.link { border: 0; background: none; color: var(--accent); padding: 0; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+#log > div { min-height: 1.4em; }
 #log .err { color: #dc2626; }
+#log .b { font-weight: bold; }
+#log .d { opacity: 0.7; }
+#log .u { text-decoration: underline; }
+#log .f0 { color: var(--t0); }
+#log .f1 { color: var(--t1); }
+#log .f2 { color: var(--t2); }
+#log .f3 { color: var(--t3); }
+#log .f4 { color: var(--t4); }
+#log .f5 { color: var(--t5); }
+#log .f6 { color: var(--t6); }
+#log .f7 { color: var(--t7); }
+#log .f8 { color: var(--t8); }
+#log .f9 { color: var(--t9); }
+#log .f10 { color: var(--t10); }
+#log .f11 { color: var(--t11); }
+#log .f12 { color: var(--t12); }
+#log .f13 { color: var(--t13); }
+#log .f14 { color: var(--t14); }
+#log .f15 { color: var(--t15); }
+#log .g0 { background: var(--t0); color: var(--panel); }
+#log .g1 { background: var(--t1); color: var(--panel); }
+#log .g2 { background: var(--t2); color: var(--panel); }
+#log .g3 { background: var(--t3); color: var(--panel); }
+#log .g4 { background: var(--t4); color: var(--panel); }
+#log .g5 { background: var(--t5); color: var(--panel); }
+#log .g6 { background: var(--t6); color: var(--panel); }
+#log .g7 { background: var(--t7); color: var(--panel); }
+#log .g8 { background: var(--t8); color: var(--panel); }
+#log .g9 { background: var(--t9); color: var(--panel); }
+#log .g10 { background: var(--t10); color: var(--panel); }
+#log .g11 { background: var(--t11); color: var(--panel); }
+#log .g12 { background: var(--t12); color: var(--panel); }
+#log .g13 { background: var(--t13); color: var(--panel); }
+#log .g14 { background: var(--t14); color: var(--panel); }
+#log .g15 { background: var(--t15); color: var(--panel); }
 #answer { display: flex; gap: 8px; padding: 8px 16px; }
 #answer input { flex: 1; font: 12px/1.4 ui-monospace, monospace; }
 #answer[hidden] { display: none; }
+#answer[data-mode="key"] button { display: none; }
 
 dialog {
   width: 360px;

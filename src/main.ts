@@ -1,6 +1,7 @@
 import "./style.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { TermLog } from "./terminal";
 
 interface Utility {
   name: string;
@@ -300,45 +301,45 @@ function renderActionBar() {
 
 // ---- running actions ----
 
-const logEl = () => $<HTMLPreElement>("log");
-let logText = "";
+const term = new TermLog($("log"));
 
-// A line still waiting for its newline, per stream (e.g. a "[y/N]" prompt).
-// The next output on that stream replaces its text.
-const partialLines = new Map<boolean, HTMLDivElement>();
+// How the waiting question is answered, or null while nothing is waiting:
+// "line" sends the text and Enter, "key" sends each key as it is pressed.
+let answerMode: "line" | "key" | null = null;
 
-function appendLog(text: string, stderr = false, partial = false, error = stderr) {
-  const pre = logEl();
-  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
-  let line = partialLines.get(stderr);
-  if (!line) {
-    line = document.createElement("div");
-    if (error) line.className = "err";
-    pre.append(line);
-  }
-  line.textContent = text;
-  if (partial) partialLines.set(stderr, line);
-  else {
-    partialLines.delete(stderr);
-    logText += text + "\n";
-  }
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+function showAnswer(mode: "line" | "key" | null, hidden = false, first = "") {
+  answerMode = running ? mode : null;
+  const form = $<HTMLFormElement>("answer");
+  const input = $<HTMLInputElement>("answertext");
+  // The box takes room from the output; keep the question in view.
+  const stick = term.atBottom();
+  form.hidden = answerMode === null;
+  if (stick) term.scrollToBottom();
+  if (answerMode === null) return;
+  form.dataset.mode = answerMode;
+  input.type = hidden ? "password" : "text";
+  input.value = first;
+  input.placeholder =
+    answerMode === "key"
+      ? "Press a key to answer"
+      : hidden
+        ? "Type the answer (hidden), then press Enter"
+        : "Type your answer, then press Enter";
+  input.focus();
 }
 
-// Shows a typed answer the way a terminal echoes it: after the prompt it answers.
-function echoAnswer(text: string) {
-  const prompt = partialLines.get(false) ?? partialLines.get(true);
-  partialLines.clear();
-  if (prompt) {
-    prompt.textContent += text;
-    logText += prompt.textContent + "\n";
-  } else appendLog(text);
+async function sendInput(text: string, enter: boolean) {
+  try {
+    await invoke("send_input", { text, enter });
+  } catch (e) {
+    term.line(String(e), "err");
+  }
 }
 
 function setRunning(value: boolean) {
   running = value;
   $<HTMLButtonElement>("cancel").hidden = !value;
-  $<HTMLFormElement>("answer").hidden = !value;
+  if (!value) showAnswer(null);
   $<HTMLButtonElement>("closerun").hidden = value;
   $<HTMLButtonElement>("copylog").hidden = false;
   render();
@@ -380,10 +381,8 @@ async function launch(op: Op, names: string[], title: string) {
 
 // Shows the run panel with one queue entry per name, then starts the run.
 async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
-  logText = "";
   rebootItems = new Set();
-  partialLines.clear();
-  logEl().replaceChildren();
+  term.reset();
   $("runtitle").textContent = title;
   $("runsummary").textContent = "";
   $("queue").replaceChildren(
@@ -398,7 +397,7 @@ async function openRun(title: string, names: string[], begin: () => Promise<unkn
   try {
     await begin();
   } catch (e) {
-    appendLog(String(e), true);
+    term.line(String(e), "err");
     setRunning(false);
   }
 }
@@ -433,23 +432,37 @@ $("clearsel").addEventListener("click", () => {
   render();
 });
 $("cancel").addEventListener("click", () => invoke("cancel_run"));
-$<HTMLFormElement>("answer").addEventListener("submit", async (ev) => {
+$<HTMLFormElement>("answer").addEventListener("submit", (ev) => {
   ev.preventDefault();
+  if (answerMode !== "line") return;
   const input = $<HTMLInputElement>("answertext");
   const text = input.value;
   input.value = "";
-  try {
-    await invoke("send_input", { text });
-    echoAnswer(text);
-  } catch (e) {
-    appendLog(String(e), true);
-  }
+  sendInput(text, true);
+});
+// A single-key question takes each key as it is pressed, as in a terminal:
+// Enter on its own picks the default and Esc reaches the script.
+$("answertext").addEventListener("keydown", (ev) => {
+  if (answerMode !== "key" || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+  const key = ev.key === "Enter" ? "" : ev.key === "Escape" ? "\x1b" : ev.key.length === 1 ? ev.key : null;
+  if (key === null) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  sendInput(key, ev.key === "Enter");
+});
+// Typing into the output while a run is going answers it, as typing into a
+// terminal does, for a question the app did not recognise as one.
+$("log").addEventListener("keydown", (ev) => {
+  if (!running || answerMode !== null || ev.ctrlKey || ev.altKey || ev.metaKey || ev.key.length !== 1) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  showAnswer("line", false, ev.key);
 });
 $("closerun").addEventListener("click", () => ($("runpanel").hidden = true));
 $("copylog").addEventListener("click", async () => {
   const button = $("copylog");
   try {
-    await navigator.clipboard.writeText(logText);
+    await navigator.clipboard.writeText(term.text());
     button.textContent = "Copied";
   } catch {
     button.textContent = "Copy failed";
@@ -469,8 +482,10 @@ $<HTMLDialogElement>("askpass").addEventListener("cancel", (ev) => {
   stopAsking(null);
 });
 
-listen<{ text: string; stderr: boolean; error: boolean; partial: boolean }>("run-output", (ev) =>
-  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial, ev.payload.error),
+listen<{ text: string; error: boolean }>("run-output", (ev) => term.line(ev.payload.text, ev.payload.error ? "err" : ""));
+listen<{ data: string }>("run-term", (ev) => term.write(ev.payload.data));
+listen<{ waiting: boolean; mode: "line" | "key"; hidden: boolean }>("run-input", (ev) =>
+  showAnswer(ev.payload.waiting ? ev.payload.mode : null, ev.payload.hidden),
 );
 listen<{ index: number; name: string; state: string; code: number | null }>("run-item", (ev) => {
   const { index, name, state, code } = ev.payload;
@@ -479,13 +494,13 @@ listen<{ index: number; name: string; state: string; code: number | null }>("run
     li.className = state;
     li.textContent = state === "failed" && code !== null ? `${name} (exit ${code})` : name;
   }
-  if (state === "running") appendLog(`--- ${name} ---`);
+  if (state === "running") term.line(`--- ${name} ---`);
   else if (state === "ok") {
     if (code !== 3 && rebootsAfter(name)) rebootItems.add(name);
-    appendLog(`--- ${name}: finished ---`);
+    term.line(`--- ${name}: finished ---`);
   }
-  else if (state === "failed") appendLog(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, true);
-  else appendLog(`--- ${name}: cancelled ---`);
+  else if (state === "failed") term.line(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, "err");
+  else term.line(`--- ${name}: cancelled ---`);
 });
 listen<{ error: string | null }>("askpass-request", (ev) => {
   $("askerr").textContent = ev.payload.error ?? "";
@@ -527,10 +542,7 @@ async function offerReboot() {
   $("rebootlater").focus();
 }
 
-$("rebootlater").addEventListener("click", () => {
-  invoke("forget_password").catch(() => {});
-  $<HTMLDialogElement>("reboot").close();
-});
+$("rebootlater").addEventListener("click", () => $<HTMLDialogElement>("reboot").close());
 $("rebootnow").addEventListener("click", async () => {
   try {
     await invoke("reboot_now");
@@ -766,7 +778,7 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
   {
     key: "auto_confirm",
     label: "Answer yes to installer questions",
-    help: "Some installers ask before a risky step, such as deleting the cloud-init user, switching the login screen or resetting repositories. The app has no terminal to answer in, so they are answered no unless this is on.",
+    help: "Some installers ask before a risky step, such as deleting the cloud-init user, switching the login screen or resetting repositories. Off, they ask in the run panel; on, they go ahead without asking.",
     kind: "bool",
     def: "false",
   },
@@ -1111,4 +1123,6 @@ invoke<string | null>("detected_distro").then((d) => {
   $("distro").textContent = d;
   $("distro").title = d;
 });
+// Ask for the sudo password now, as linux_util does before its menu.
+invoke("start_session").catch(() => {});
 load();

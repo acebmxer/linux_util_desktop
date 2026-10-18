@@ -11,8 +11,32 @@ release is cut.
 
 ## [Unreleased]
 
+### Changed
+
+- **The administrator password is asked once, when the app starts,** as
+  linux_util asks before its menu, instead of at the start of every run, even
+  runs that needed no administrator rights. It is kept in memory only and asked
+  again only once sudo's own timeout has passed with nothing running.
+- **The run panel shows the run as a terminal window does.** Output arrives as
+  one stream in the order it was written, with linux_util's colours, spinners
+  and package-manager progress bars, and "Copy log" copies what is on screen.
+  The answer box appears only while a question is waiting: a line or menu
+  number with Enter, a single key on its own, or a hidden answer such as a
+  password.
+
 ### Fixed
 
+- **Single-key questions got the wrong answer.** Snapper, Timeshift, Bootloader
+  Manager, Xen Guest Utilities and others ask for one key. The app sent the key
+  with Enter, and the leftover Enter answered the next question with its
+  default. A single-key question now gets just the key.
+- **Hidden answers were shown and logged.** Mount SMB Share and Update Mount ask
+  for a password with hidden input; the answer box showed it and copied it into
+  the log. It is now a password field and the answer is never shown.
+- **"Copy log" put each answered question below the lines that came after it.**
+- **Every run started with "Script directory is not a git repository; cannot
+  self-update."** The bundled copy is updated with the app, so runs now tell
+  linux_util to skip its own update check.
 - **Installers that ask a question on the terminal were cancelled.** NVIDIA
   Drivers on Fedora asked "enable RPM Fusion now?" by reading `/dev/tty`, which
   the app's scripts did not have, so the install failed with "No such device or
@@ -23,6 +47,10 @@ release is cut.
   install on Fedora, then stayed "running" with no question asked, because the
   app waited for that process to let go of the terminal. The item now ends two
   seconds after the script itself exits.
+
+  Questions written straight to the terminal by programs other than the script,
+  such as `chsh` asking for your password in Zsh + Oh My Zsh, never appeared;
+  they now show in the run panel like any other question.
 - **Reboot now failed on systems with passwordless sudo.** The reboot used
   `sudo` only when a password had been collected during the run, and with
   passwordless sudo none ever is. It then fell back to `systemctl reboot` as the

@@ -21,6 +21,14 @@ app writes only these keys, all read by `load_config` in `lib/config.sh`:
 `max_logs_per_day` (positive integers). The contract test checks each key is
 still parsed and that a file named by `LINUX_UTIL_CONFIG_FILE` is loaded.
 
+## Environment
+
+Every install, uninstall and update run sets `LINUX_UTIL_NO_SELF_UPDATE=1`.
+The bundled copy is updated with the app, not by git, so linux_util's own
+update check (`self_update_script` in `lib/installers/self_update.sh`) is
+skipped; it prints one `[INFO]` line saying so. Runs no longer pass
+`--no-color`: the script's output is a terminal and the app shows its colours.
+
 ## Logs
 
 The log viewer reads `logs/` beside the per-user copy: `success_*.log`,

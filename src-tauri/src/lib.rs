@@ -89,6 +89,9 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 pub(crate) fn script_command(app: &tauri::AppHandle, script: &std::path::Path) -> Command {
     let mut cmd = Command::new("bash");
     use_host_env(&mut cmd);
+    // The bundled copy is updated with the app, not by git, so linux_util's
+    // own update check could only warn that it is not a git checkout.
+    cmd.env("LINUX_UTIL_NO_SELF_UPDATE", "1");
     if let Some(conf) = settings::linux_util_conf_path(app) {
         cmd.env("LINUX_UTIL_CONFIG_FILE", conf);
     }
@@ -300,7 +303,7 @@ pub fn run() {
             actions::send_input,
             actions::reboot_needed,
             actions::reboot_now,
-            actions::forget_password,
+            actions::start_session,
             profiles::list_profiles,
             profiles::import_profile,
             profiles::export_profile,

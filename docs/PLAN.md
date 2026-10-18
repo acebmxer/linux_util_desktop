@@ -50,6 +50,13 @@ action. The helper can hold the password in memory for the length of one run.
 Stage 3 starts by proving this works on Fedora before building on it.
 Fallback if it does not: run the script inside a PTY and answer the prompt.
 
+Scripts now run on a PTY that is their stdin, stdout, stderr and controlling
+terminal, so linux_util behaves as it does in a terminal window. The password
+is asked once, when the app starts, and held in memory until sudo's own
+timeout passes with nothing running; the helper answers every sudo call from
+it. The run panel draws the terminal's output and shows the answer box only
+while a question is waiting (`docs/terminal-wrapper.md` while that work is open).
+
 ## Stages
 
 ### Stage 0: Groundwork (done)

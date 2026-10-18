@@ -49,14 +49,23 @@ linux_util's own format, so a file saved by the app can be applied on another
 machine with `linux_util.sh --import-profile <file>`.
 
 Settings has a theme (follow the system, light or dark) and the linux_util
-options that affect the app's runs: answering yes to installer questions
-(without a terminal they are answered no), verbose and debug output, and how
-long logs are kept. They are saved in the app's config folder
+options that affect the app's runs: answering yes to the questions installers
+ask before a risky step instead of asking them, verbose and debug output, and
+how long logs are kept. They are saved in the app's config folder
 (`~/.config/io.github.acebmxer.linux-util-desktop/`).
 
-While a run is going, a box under its output sends a typed answer to the run,
-for questions the package manager itself asks, such as dnf's `Is this ok
-[y/N]` or apt's `Do you want to continue? [Y/n]` during **System Updates**.
+The administrator password is asked once, when the app starts, as linux_util
+asks before its menu. It is kept in memory only, never on disk, and asked again
+only once sudo's own timeout (5 minutes unless your system sets another) has
+passed with nothing running.
+
+Each run gets a terminal of its own, so linux_util behaves exactly as it does
+in a terminal window, and the output panel shows what that terminal shows,
+colours included. When a question is waiting, a box appears under the output:
+type a line or a menu number and press Enter, press one key for a question that
+takes a single key, or type a hidden answer such as a password, which is never
+shown or logged. Typing into the output also opens the box, for a question the
+app did not recognise.
 
 The window's bottom line shows the app version and the bundled linux_util
 version. On launch the app looks at this project's latest stable GitHub release
@@ -88,8 +97,9 @@ change is needed.
 - **Look the same everywhere.** One interface on GNOME, KDE and the rest,
   mirroring the layout of the linux_util terminal UI (categories, search,
   multi-select).
-- **No terminal, no password handling in the app.** Admin rights go through
-  the system's own password prompt.
+- **No terminal window needed.** Each run has its own terminal behind the
+  scenes, and its questions and the administrator password are answered in
+  the app.
 - **Pinned and reproducible.** Each release bundles a known version of
   `linux_util.sh`.
 

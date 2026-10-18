@@ -4,8 +4,14 @@
 //! as the normal user with a `sudo` shim first on `PATH` that adds `-A`.
 //! `SUDO_ASKPASS` points at this same executable started with `--askpass`; it
 //! asks the running app for the password over a private Unix socket and the
-//! app shows its own dialog. The password is checked once, kept in memory for
-//! the length of one run and never written to disk.
+//! app shows its own dialog. The password is asked once, when the app starts
+//! (as linux_util asks before its menu), kept in memory only, and forgotten
+//! once sudo's own timeout has passed with nothing running.
+//!
+//! Each script runs on its own pseudo-terminal, which is its stdin, stdout,
+//! stderr and controlling terminal, so it behaves as it does in a terminal
+//! window. The run panel draws that terminal's output and shows the answer box
+//! only while a question is waiting.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -17,7 +23,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -28,6 +34,32 @@ const SOCKET_ENV: &str = "LU_ASKPASS_SOCK";
 #[derive(Default)]
 pub struct RunState {
     inner: Mutex<Inner>,
+    session: Mutex<Session>,
+}
+
+/// The sudo password, held for the app session the way a terminal holds a sudo
+/// login. Kept apart from `Inner`, which each run starts afresh.
+#[derive(Default)]
+struct Session {
+    password: Option<String>,
+    /// sudo's `timestamp_timeout`, read when the password is accepted. `None`
+    /// means never forget (sudo's negative timeout).
+    timeout: Option<Duration>,
+    /// When the last run ended, or the password was given outside a run.
+    /// `None` while a run is going, so a run never times out half way.
+    idle_since: Option<Instant>,
+}
+
+impl Session {
+    /// The held password, forgetting it first if the timeout has passed.
+    fn password(&mut self) -> Option<String> {
+        if let (Some(since), Some(limit)) = (self.idle_since, self.timeout) {
+            if since.elapsed() >= limit {
+                self.password = None;
+            }
+        }
+        self.password.clone()
+    }
 }
 
 #[derive(Default)]
@@ -39,23 +71,32 @@ struct Inner {
     reply: Option<mpsc::Sender<Option<String>>>,
     /// The master side of the script's terminal, for answers typed into the run panel.
     stdin: Option<File>,
-    /// Output received after the last newline, per stream; see `pump`.
-    pending: Vec<Arc<Mutex<Vec<u8>>>>,
-    /// The sudo password the last run was given, kept in memory only so the
-    /// reboot offer after it does not ask again. Dropped when that offer ends.
-    sudo_password: Option<String>,
+    /// False when no pty could be opened and `stdin` is a plain pipe.
+    stdin_is_pty: bool,
 }
 
+/// A line from the app itself rather than the script, such as an update's
+/// progress or a failure to start.
 #[derive(Serialize, Clone)]
 struct Output<'a> {
     text: &'a str,
-    stderr: bool,
-    /// Shown in the error colour. The script's own stderr is not: tools such as
-    /// dnf write their normal progress there, and a terminal shows it plain.
+    /// Shown in the error colour.
     error: bool,
-    /// The line so far, still waiting for its newline (e.g. a `[y/N]` prompt).
-    /// The next event on the same stream replaces it.
-    partial: bool,
+}
+
+/// Raw terminal output for the run panel to draw, escape sequences included.
+#[derive(Serialize, Clone)]
+struct TermOutput<'a> {
+    data: &'a str,
+}
+
+/// Whether a question is waiting for an answer, and how it is answered:
+/// `mode` "line" (text and Enter) or "key" (keys sent as typed, no Enter).
+#[derive(Serialize, Clone)]
+struct InputEvent {
+    waiting: bool,
+    mode: &'static str,
+    hidden: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -128,7 +169,7 @@ if [ "$1" = systemctl ]; then
     esac
 fi
 # sudo drops BASH_ENV, so a script run as `sudo bash <script>` (the guest tools
-# ISO's installer) would lose the prompt-showing `read`; load it inside root's bash.
+# ISO's installer) would lose the app's `read`; load it inside root's bash.
 if [ "$1" = bash ]; then
     shift
     exec {REAL_SUDO} -A bash -c '. {PRELUDE}; export -f read; exec bash "$@"' bash "$@"
@@ -136,11 +177,20 @@ fi
 exec {REAL_SUDO} -A "$@"
 "#;
 
-/// Sourced by every bash the script starts (`BASH_ENV`). Bash prints the prompt
-/// of `read -p` only when stdin is a terminal, and here it is a pipe, so a
-/// prompt such as "Retry? [y/N]" never showed and the run seemed stuck. This
-/// prints it to stderr instead. Handles `-p` as its own option or last in a
-/// cluster (`-rp`), which is how linux_util writes them.
+/// Sourced by every bash the script starts (`BASH_ENV`). It changes nothing
+/// about what `read` does; it only lets the app follow it.
+///
+/// On the app's terminal it tells the run panel that a question is waiting and
+/// how it is answered, with a private escape sequence the app strips from the
+/// output: `ESC ] 7701 ; wait ; line|key ; 0|1 BEL` before the read (key when
+/// `-n`/`-N` read a fixed number of keys, 1 when `-s` hides the input) and
+/// `ESC ] 7701 ; done BEL` after it. Reads that are not from the terminal (a
+/// file, a FIFO) and short timed reads (linux_util drains Esc sequences with
+/// `-t 0.05`) are left alone.
+///
+/// Without a pty, stdin is a pipe and bash prints no `read -p` prompt, so the
+/// prompt is printed to stderr instead. Handles `-p` as its own option or last
+/// in a cluster (`-rp`), which is how linux_util writes them.
 const READ_PRELUDE: &str = r#"read() {
     if [ -p /dev/stdin ]; then
         local __rp_args=() __rp_prompt="" __rp_have=0 __rp_a
@@ -156,36 +206,85 @@ const READ_PRELUDE: &str = r#"read() {
         builtin read "${__rp_args[@]}"
         return
     fi
+    local __lu_fd=0 __lu_mode=line __lu_hidden=0 __lu_t="" __lu_want="" __lu_a __lu_i __lu_c
+    for __lu_a in "$@"; do
+        if [ -n "$__lu_want" ]; then
+            case "$__lu_want" in
+                u) __lu_fd=$__lu_a ;;
+                t) __lu_t=$__lu_a ;;
+            esac
+            __lu_want=""
+            continue
+        fi
+        case "$__lu_a" in
+            --) break ;;
+            -?*) ;;
+            *) break ;;
+        esac
+        __lu_i=1
+        while [ "$__lu_i" -lt "${#__lu_a}" ]; do
+            __lu_c=${__lu_a:__lu_i:1}
+            __lu_i=$((__lu_i + 1))
+            case "$__lu_c" in
+                s) __lu_hidden=1 ;;
+                n|N) __lu_mode=key ;;
+            esac
+            case "$__lu_c" in
+                a|d|i|n|N|p|t|u)
+                    if [ "$__lu_i" -lt "${#__lu_a}" ]; then
+                        case "$__lu_c" in
+                            u) __lu_fd=${__lu_a:__lu_i} ;;
+                            t) __lu_t=${__lu_a:__lu_i} ;;
+                        esac
+                    else
+                        __lu_want=$__lu_c
+                    fi
+                    break
+                    ;;
+            esac
+        done
+    done
+    case "$__lu_t" in
+        0|0.*|.*) builtin read "$@"; return ;;
+    esac
+    if ! [ -t "$__lu_fd" ] || ! { : >/dev/tty; } 2>/dev/null; then
+        builtin read "$@"
+        return
+    fi
+    printf '\033]7701;wait;%s;%s\007' "$__lu_mode" "$__lu_hidden" >/dev/tty
     builtin read "$@"
+    local __lu_rc=$?
+    printf '\033]7701;done\007' >/dev/tty 2>/dev/null
+    return $__lu_rc
 }
 "#;
 
-/// A pseudo-terminal for one script. linux_util's installers ask with
-/// `read ... < /dev/tty`, which only exists when the process has a controlling
-/// terminal; the app has none, so those prompts failed and the install was
-/// cancelled. The script gets the slave as stdin and controlling terminal, and
-/// answers typed in the run panel are written to the master.
+/// A pseudo-terminal for one script. linux_util is written for a terminal: its
+/// installers ask with `read ... < /dev/tty`, and it switches to colours and
+/// spinners when its output is one. The script gets the slave as stdin,
+/// stdout, stderr and controlling terminal, so everything it writes arrives on
+/// the master in order, as a terminal window receives it. Answers typed in the
+/// run panel are written to the master, and the terminal echoes them as usual
+/// (or not, when the program turns echo off for a password).
 struct Pty {
     master: File,
     slave: File,
 }
 
+/// The terminal size the script is told. Programs that draw to the width (dnf
+/// and apt progress bars, tables) lay out for this many columns.
+const PTY_COLS: u16 = 120;
+const PTY_ROWS: u16 = 40;
+
 impl Pty {
     fn open() -> std::io::Result<Self> {
         let (mut m, mut sl) = (0, 0);
-        let rc = unsafe {
-            libc::openpty(&mut m, &mut sl, std::ptr::null_mut(), std::ptr::null(), std::ptr::null())
-        };
+        let size = libc::winsize { ws_row: PTY_ROWS, ws_col: PTY_COLS, ws_xpixel: 0, ws_ypixel: 0 };
+        let rc = unsafe { libc::openpty(&mut m, &mut sl, std::ptr::null_mut(), std::ptr::null(), &size) };
         if rc != 0 {
             return Err(std::io::Error::last_os_error());
         }
         let (master, slave) = unsafe { (File::from_raw_fd(m), File::from_raw_fd(sl)) };
-        // The panel echoes typed answers itself, so the terminal must not.
-        let mut t: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut t) } == 0 {
-            t.c_lflag &= !(libc::ECHO | libc::ECHONL);
-            unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &t) };
-        }
         for f in [&master, &slave] {
             unsafe { libc::fcntl(f.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
         }
@@ -283,19 +382,91 @@ fn password_ok(real_sudo: &Path, password: &str) -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
-#[derive(Default)]
-struct Credentials {
-    password: Option<String>,
-    denied: bool,
+/// True when sudo is set up to run without a password (NOPASSWD). A login
+/// cached from earlier does not count (`-k`): it is tied to another terminal,
+/// so the scripts' own terminals could not use it.
+fn sudo_without_password(real_sudo: &Path) -> bool {
+    let mut cmd = Command::new(real_sudo);
+    crate::use_host_env(&mut cmd);
+    cmd.args(["-n", "-k", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    matches!(cmd.status(), Ok(s) if s.success())
 }
 
-fn serve_askpass(
-    app: AppHandle,
-    listener: UnixListener,
-    real_sudo: PathBuf,
-    stop: Arc<AtomicBool>,
-) -> Option<String> {
-    let mut creds = Credentials::default();
+/// sudo's default `timestamp_timeout`, used when the configured one can't be read.
+const SUDO_DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// sudo's `timestamp_timeout`, as `sudo -V` reports it when run as root
+/// ("Authentication timestamp timeout: 5.0 minutes"). `None` means never time
+/// out (a negative setting). Falls back to sudo's default of 5 minutes.
+fn sudo_timeout(real_sudo: &Path, password: &str) -> Option<Duration> {
+    let mut cmd = Command::new(real_sudo);
+    crate::use_host_env(&mut cmd);
+    let child = cmd
+        .env("LC_ALL", "C")
+        .args(["-S", "-p", ""])
+        .arg(real_sudo)
+        .arg("-V")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return Some(SUDO_DEFAULT_TIMEOUT) };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "{password}");
+    }
+    let text = child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    parse_sudo_timeout(&text)
+}
+
+fn parse_sudo_timeout(sudo_v: &str) -> Option<Duration> {
+    let minutes = sudo_v
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Authentication timestamp timeout:"))
+        .and_then(|v| v.split_whitespace().next()?.parse::<f64>().ok());
+    match minutes {
+        Some(m) if m < 0.0 => None,
+        Some(m) if m.is_finite() => Some(Duration::from_secs_f64(m * 60.0)),
+        _ => Some(SUDO_DEFAULT_TIMEOUT),
+    }
+}
+
+/// Shows the app's password dialog until sudo accepts the password or the
+/// user cancels (`None`).
+fn ask_password(app: &AppHandle, real_sudo: &Path) -> Option<String> {
+    let state = app.state::<RunState>();
+    let mut error = None;
+    let answer = loop {
+        let (tx, rx) = mpsc::channel();
+        state.inner.lock().unwrap().reply = Some(tx);
+        let _ = app.emit("askpass-request", AskpassRequest { error: error.take() });
+        match rx.recv() {
+            Ok(Some(pw)) if password_ok(real_sudo, &pw) => break Some(pw),
+            Ok(Some(_)) => error = Some("Wrong password, try again.".to_string()),
+            _ => break None,
+        }
+    };
+    state.inner.lock().unwrap().reply = None;
+    let _ = app.emit("askpass-close", ());
+    answer
+}
+
+/// Holds an accepted password for the session. Outside a run, its timeout
+/// starts now.
+fn keep_password(state: &RunState, real_sudo: &Path, password: String) {
+    let timeout = sudo_timeout(real_sudo, &password);
+    let running = state.inner.lock().unwrap().running;
+    let mut session = state.session.lock().unwrap();
+    session.password = Some(password);
+    session.timeout = timeout;
+    session.idle_since = if running { None } else { Some(Instant::now()) };
+}
+
+/// Answers each askpass request from the session's password, asking for it
+/// (once) when none is held. After a cancel, the rest of the run's requests
+/// fail without asking again.
+fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, stop: Arc<AtomicBool>) {
+    let state = app.state::<RunState>();
+    let mut denied = false;
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::SeqCst) {
         let mut stream = match listener.accept() {
@@ -306,36 +477,38 @@ fn serve_askpass(
             }
         };
         let _ = stream.set_nonblocking(false);
-        if creds.denied {
+        if denied {
             continue; // dropping the stream makes askpass exit 1
         }
-        if creds.password.is_none() {
-            let state = app.state::<RunState>();
-            let mut error = None;
-            loop {
-                let (tx, rx) = mpsc::channel();
-                state.inner.lock().unwrap().reply = Some(tx);
-                let _ = app.emit("askpass-request", AskpassRequest { error: error.take() });
-                match rx.recv() {
-                    Ok(Some(pw)) if password_ok(&real_sudo, &pw) => {
-                        creds.password = Some(pw);
-                        break;
-                    }
-                    Ok(Some(_)) => error = Some("Wrong password, try again.".to_string()),
-                    _ => {
-                        creds.denied = true;
-                        break;
-                    }
-                }
+        let held = state.session.lock().unwrap().password();
+        let password = held.or_else(|| {
+            let pw = ask_password(&app, &real_sudo)?;
+            keep_password(&state, &real_sudo, pw.clone());
+            Some(pw)
+        });
+        match password {
+            Some(pw) => {
+                let _ = stream.write_all(pw.as_bytes());
             }
-            state.inner.lock().unwrap().reply = None;
-            let _ = app.emit("askpass-close", ());
-        }
-        if let Some(pw) = &creds.password {
-            let _ = stream.write_all(pw.as_bytes());
+            None => denied = true,
         }
     }
-    creds.password
+}
+
+/// Asks for the sudo password when the app starts, as linux_util does before
+/// its menu, unless sudo needs none. Cancelling leaves it to the first run.
+#[tauri::command]
+pub async fn start_session(app: AppHandle) {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let Some(sudo) = find_in_path("sudo") else { return };
+        if sudo_without_password(&sudo) {
+            return;
+        }
+        if let Some(pw) = ask_password(&app, &sudo) {
+            keep_password(&app.state::<RunState>(), &sudo, pw);
+        }
+    })
+    .await;
 }
 
 /// Copies `from` into `to`, leaving out top-level entries named in `skip`.
@@ -434,20 +607,207 @@ const NO_CHANGES_LINE: &str = "No package changes were made.";
 /// terminal, linux_util's menu carries on in the same case.
 const OUTPUT_GRACE: Duration = Duration::from_secs(2);
 
-/// Sends `reader`'s output to the UI a line at a time. Text left after the
-/// last newline is also sent, as a partial line, so a prompt that waits for an
-/// answer without ending its line is visible before the answer is typed.
+/// Start of the private escape sequence the `read` wrapper writes (see
+/// `READ_PRELUDE`); it ends at BEL.
+const SIGNAL_START: &[u8] = b"\x1b]7701;";
+
+/// Splits terminal output into what is shown and the `read` wrapper's signals,
+/// across reads that may cut a signal in two.
+#[derive(Default)]
+struct Signals {
+    held: Vec<u8>,
+}
+
+impl Signals {
+    fn feed(&mut self, data: &[u8]) -> (Vec<u8>, Vec<String>) {
+        let mut buf = std::mem::take(&mut self.held);
+        buf.extend_from_slice(data);
+        let (mut out, mut signals) = (Vec::with_capacity(buf.len()), Vec::new());
+        let mut i = 0;
+        while i < buf.len() {
+            let rest = &buf[i..];
+            if rest[0] == 0x1b {
+                if rest.len() < SIGNAL_START.len() && SIGNAL_START.starts_with(rest) {
+                    self.held = rest.to_vec();
+                    break;
+                }
+                if rest.starts_with(SIGNAL_START) {
+                    match rest.iter().position(|&b| b == 0x07) {
+                        Some(end) => {
+                            signals.push(String::from_utf8_lossy(&rest[SIGNAL_START.len()..end]).into_owned());
+                            i += end + 1;
+                            continue;
+                        }
+                        None if rest.len() < 64 => {
+                            self.held = rest.to_vec();
+                            break;
+                        }
+                        None => {} // too long to be ours: pass it through
+                    }
+                }
+            }
+            out.push(rest[0]);
+            i += 1;
+        }
+        (out, signals)
+    }
+}
+
+/// Decodes `data` as UTF-8, holding back a character cut off at the end of a
+/// read until the next one completes it. Invalid bytes become U+FFFD.
+fn decode_utf8(held: &mut Vec<u8>, data: &[u8]) -> String {
+    held.extend_from_slice(data);
+    let mut text = String::new();
+    let mut rest: &[u8] = held;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                text.push_str(s);
+                rest = &[];
+                break;
+            }
+            Err(e) => {
+                let (good, bad) = rest.split_at(e.valid_up_to());
+                text.push_str(std::str::from_utf8(good).unwrap_or_default());
+                match e.error_len() {
+                    Some(n) => {
+                        text.push('\u{fffd}');
+                        rest = &bad[n..];
+                    }
+                    None => {
+                        rest = bad;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    *held = rest.to_vec();
+    text
+}
+
+/// How long output must have stopped, on an unfinished line that looks like a
+/// question, before the run panel offers the answer box for a program other
+/// than bash's `read` (`chsh` asking for a password, a package manager's own
+/// `[y/N]`).
+const PROMPT_IDLE: Duration = Duration::from_millis(500);
+
+/// What the run panel knows about a question waiting on the terminal.
+#[derive(Default)]
+struct Prompt {
+    last_output: Option<Instant>,
+    /// The text of the unfinished last line; empty after a newline.
+    open_line: String,
+    /// A bash `read` signalled it is waiting.
+    reading: bool,
+    /// The answer box is shown on a guess (no signal); new output takes it away.
+    guessed: bool,
+}
+
+impl Prompt {
+    fn show(app: &AppHandle, mode: &'static str, hidden: bool) {
+        let _ = app.emit("run-input", InputEvent { waiting: true, mode, hidden });
+    }
+
+    fn hide(app: &AppHandle) {
+        let _ = app.emit("run-input", InputEvent { waiting: false, mode: "line", hidden: false });
+    }
+
+    fn output(&mut self, app: &AppHandle, line_tail: Option<&str>) {
+        self.last_output = Some(Instant::now());
+        match line_tail {
+            Some(tail) => self.open_line = tail.to_string(),
+            None => self.open_line.clear(),
+        }
+        if self.guessed {
+            self.guessed = false;
+            Self::hide(app);
+        }
+    }
+
+    fn signal(&mut self, app: &AppHandle, signal: &str) {
+        let mut parts = signal.split(';');
+        match parts.next() {
+            Some("wait") => {
+                let mode = if parts.next() == Some("key") { "key" } else { "line" };
+                let hidden = parts.next() == Some("1");
+                self.reading = true;
+                self.guessed = false;
+                Self::show(app, mode, hidden);
+            }
+            Some("done") => {
+                self.reading = false;
+                Self::hide(app);
+            }
+            _ => {}
+        }
+    }
+
+    /// Offers the answer box when output has stopped on what looks like a
+    /// question.
+    fn check_idle(&mut self, app: &AppHandle, master: Option<&File>) {
+        if let Some((mode, hidden)) = self.idle_guess(master) {
+            Self::show(app, mode, hidden);
+        }
+    }
+
+    /// The answer box to offer now, if output has stopped on what looks like a
+    /// question with no signal. The terminal's own mode says how it is
+    /// answered: echo off is a password, line editing off is single keys.
+    fn idle_guess(&mut self, master: Option<&File>) -> Option<(&'static str, bool)> {
+        if self.reading || self.guessed || !looks_like_question(&self.open_line) {
+            return None;
+        }
+        if !self.last_output.is_some_and(|t| t.elapsed() >= PROMPT_IDLE) {
+            return None;
+        }
+        self.guessed = true;
+        Some(master.map(terminal_mode).unwrap_or(("line", false)))
+    }
+}
+
+/// True for the end of a line that asks something: "Password: ",
+/// "Is this ok [y/N]: ", "Do you want to continue? [Y/n] ".
+fn looks_like_question(line: &str) -> bool {
+    matches!(line.trim_end().chars().last(), Some(':' | '?' | ']' | ')' | '>'))
+}
+
+/// How the program reading the terminal wants its answer. While sudo relays a
+/// command it puts this terminal in raw mode (echo and line editing both off);
+/// the command behind it still reads lines, so that counts as "line".
+fn terminal_mode(master: &File) -> (&'static str, bool) {
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(master.as_raw_fd(), &mut t) } != 0 {
+        return ("line", false);
+    }
+    let canonical = t.c_lflag & libc::ICANON != 0;
+    let echo = t.c_lflag & libc::ECHO != 0;
+    match (canonical, echo) {
+        (true, false) => ("line", true),
+        (false, true) => ("key", false),
+        _ => ("line", false),
+    }
+}
+
+/// Longest line kept for the "No package changes" check; the rest is dropped.
+const MAX_LINE: usize = 64 * 1024;
+
+/// Sends `reader`'s output to the run panel as it arrives, as terminal data.
+/// Takes the `read` wrapper's signals out of it, notes the "No package changes"
+/// line, and keeps `prompt` up to date.
 fn pump<R: Read + Send + 'static>(
     app: AppHandle,
     mut reader: R,
-    stderr: bool,
-    pending: Arc<Mutex<Vec<u8>>>,
+    prompt: Arc<Mutex<Prompt>>,
     no_changes: Arc<AtomicBool>,
     done: mpsc::Sender<()>,
     detached: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         let _done = done;
+        let mut signals = Signals::default();
+        let mut utf8 = Vec::new();
+        let mut line: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
             let n = match reader.read(&mut chunk) {
@@ -457,31 +817,43 @@ fn pump<R: Read + Send + 'static>(
                 Err(_) => break,
             };
             // Past the grace period the item has ended; keep reading so the
-            // leftover process never blocks on a full pipe, but show nothing.
+            // leftover process never blocks on a full buffer, but show nothing.
             if detached.load(Ordering::SeqCst) {
                 continue;
             }
-            let mut pending = pending.lock().unwrap();
-            pending.extend_from_slice(&chunk[..n]);
-            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = pending.drain(..=end).collect();
-                let text = clean_line(&line);
-                if text.contains(NO_CHANGES_LINE) {
-                    no_changes.store(true, Ordering::SeqCst);
+            let (out, sigs) = signals.feed(&chunk[..n]);
+            let text = decode_utf8(&mut utf8, &out);
+            if !text.is_empty() {
+                for &b in text.as_bytes() {
+                    if b == b'\n' {
+                        if clean_line(&line).contains(NO_CHANGES_LINE) {
+                            no_changes.store(true, Ordering::SeqCst);
+                        }
+                        line.clear();
+                    } else if line.len() < MAX_LINE {
+                        line.push(b);
+                    }
                 }
-                let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: false });
+                let _ = app.emit("run-term", TermOutput { data: &text });
+                let tail = (!line.is_empty()).then(|| clean_line(&line));
+                prompt.lock().unwrap().output(&app, tail.as_deref());
             }
-            if !pending.is_empty() {
-                let text = clean_line(&pending);
-                let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: true });
+            for signal in sigs {
+                prompt.lock().unwrap().signal(&app, &signal);
             }
         }
-        let mut pending = pending.lock().unwrap();
-        if !pending.is_empty() && !detached.load(Ordering::SeqCst) {
-            let text = clean_line(&pending);
-            pending.clear();
-            let _ = app.emit("run-output", Output { text: &text, stderr, error: false, partial: false });
+    });
+}
+
+/// Checks for a question waiting without a signal until `finished`, then
+/// takes the answer box away.
+fn watch_prompt(app: AppHandle, prompt: Arc<Mutex<Prompt>>, master: Option<File>, finished: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !finished.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(150));
+            prompt.lock().unwrap().check_idle(&app, master.as_ref());
         }
+        Prompt::hide(&app);
     });
 }
 
@@ -491,9 +863,9 @@ fn wait_for_readers(done: &mpsc::Receiver<()>, grace: Duration) -> bool {
     matches!(done.recv_timeout(grace), Err(mpsc::RecvTimeoutError::Disconnected))
 }
 
-/// Tells the UI a line of output. `stderr` lines show in the error colour.
-pub(crate) fn emit_output(app: &AppHandle, text: &str, stderr: bool) {
-    let _ = app.emit("run-output", Output { text, stderr, error: stderr, partial: false });
+/// Tells the UI a line of the app's own output, in the error colour when `error`.
+pub(crate) fn emit_output(app: &AppHandle, text: &str, error: bool) {
+    let _ = app.emit("run-output", Output { text, error });
 }
 
 /// Tells the UI the state of queue entry `index`.
@@ -531,7 +903,13 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             return;
         }
     };
-    state.inner.lock().unwrap().sudo_password = None;
+    {
+        // The run starts now: let a timed-out password go, then hold the rest
+        // until it ends.
+        let mut session = state.session.lock().unwrap();
+        session.password();
+        session.idle_since = None;
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let server = UnixListener::bind(work.socket_path()).ok().map(|listener| {
         let (app, stop, sudo) = (app.clone(), stop.clone(), real_sudo.clone());
@@ -556,11 +934,20 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
             .env("BASH_ENV", work.prelude_path())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        match pty.as_ref().and_then(|p| p.slave.try_clone().ok()) {
-            Some(slave) => {
-                cmd.stdin(Stdio::from(slave));
+            // Nobody can page through output here, so pagers print and carry on.
+            .env("PAGER", "cat")
+            .env("SYSTEMD_PAGER", "cat")
+            .env("GIT_PAGER", "cat");
+        let slaves = pty.as_ref().and_then(|p| {
+            Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?])
+        });
+        let on_pty = slaves.is_some();
+        match slaves {
+            Some([stdin, stdout, stderr]) => {
+                cmd.env("TERM", "xterm-256color")
+                    .stdin(Stdio::from(stdin))
+                    .stdout(Stdio::from(stdout))
+                    .stderr(Stdio::from(stderr));
                 // New session whose controlling terminal is the pty (fd 0, set
                 // up before this runs); its process group is then the child's pid.
                 unsafe {
@@ -573,23 +960,24 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
                 }
             }
             None => {
-                cmd.stdin(Stdio::piped()).process_group(0);
+                cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
             }
         }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
-                let _ = app.emit("run-output", Output { text: &msg, stderr: true, error: true, partial: false });
+                let _ = app.emit("run-output", Output { text: &msg, error: true });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
                 continue;
             }
         };
-        let pending = [Arc::default(), Arc::default()];
+        let pty = pty.filter(|_| on_pty);
         {
             let mut inner = state.inner.lock().unwrap();
             inner.pid = Some(child.id());
+            inner.stdin_is_pty = pty.is_some();
             inner.stdin = match &pty {
                 Some(p) => p.master.try_clone().ok(),
                 None => None,
@@ -598,37 +986,38 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
                 // No pty: the pipe's write end, wrapped as a File.
                 child.stdin.take().map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
             });
-            inner.pending = pending.to_vec();
         }
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let detached = Arc::new(AtomicBool::new(false));
-        // Drain what the script writes to its terminal (nothing normally) so it
-        // never blocks; reading ends with EIO once the script and its children exit.
-        if let Some(Pty { master, slave }) = pty {
-            drop(slave);
-            let done = done_tx.clone();
-            std::thread::spawn(move || {
-                let _done = done;
-                let mut master = master;
-                let mut buf = [0u8; 1024];
-                while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
-            });
-        }
-        let [out_pending, err_pending] = pending;
+        let finished = Arc::new(AtomicBool::new(false));
+        let prompt = Arc::new(Mutex::new(Prompt::default()));
         let no_changes = Arc::new(AtomicBool::new(false));
-        pump(app.clone(), child.stdout.take().unwrap(), false, out_pending, no_changes.clone(), done_tx.clone(), detached.clone());
-        pump(app.clone(), child.stderr.take().unwrap(), true, err_pending, no_changes.clone(), done_tx.clone(), detached.clone());
-        drop(done_tx);
-        let status = child.wait();
-        {
-            let mut inner = state.inner.lock().unwrap();
-            inner.stdin = None; // closing it lets a child left reading stdin see EOF
-            inner.pending.clear();
+        // Reading the master ends with EIO once the script and its children exit.
+        let mut master_for_mode = None;
+        match pty {
+            Some(Pty { master, slave }) => {
+                drop(slave);
+                master_for_mode = master.try_clone().ok();
+                pump(app.clone(), master, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+            }
+            None => {
+                if let Some(out) = child.stdout.take() {
+                    pump(app.clone(), out, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+                }
+                if let Some(err) = child.stderr.take() {
+                    pump(app.clone(), err, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+                }
+            }
         }
+        drop(done_tx);
+        watch_prompt(app.clone(), prompt, master_for_mode, finished.clone());
+        let status = child.wait();
+        state.inner.lock().unwrap().stdin = None; // closing it lets a child left reading stdin see EOF
         // Readers still going after this belong to a background process the
         // script left behind; they carry on, detached, until it closes them.
         wait_for_readers(&done_rx, OUTPUT_GRACE);
         detached.store(true, Ordering::SeqCst);
+        finished.store(true, Ordering::SeqCst);
         let cancelled = {
             let mut inner = state.inner.lock().unwrap();
             inner.pid = None;
@@ -651,9 +1040,10 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     }
 
     stop.store(true, Ordering::SeqCst);
-    if let Some(Ok(password)) = server.map(|s| s.join()) {
-        state.inner.lock().unwrap().sudo_password = password;
+    if let Some(server) = server {
+        let _ = server.join();
     }
+    state.session.lock().unwrap().idle_since = Some(Instant::now());
     let cancelled = state.inner.lock().unwrap().cancelled;
     let _ = app.emit("run-done", Done { ok, failed, cancelled });
 }
@@ -681,7 +1071,7 @@ pub fn run_action(
             if dry_run {
                 cmd.arg("--dry-run");
             }
-            cmd.args(["--no-color", &format!("--{op}")]);
+            cmd.arg(format!("--{op}"));
             cmd.arg(name);
             cmd
         });
@@ -759,14 +1149,13 @@ fn reboot_with_sudo(sudo: PathBuf, password: Option<&str>) -> Result<(), String>
     }
 }
 
-/// Reboots the machine. With `sudo` available it uses it: with the password
-/// the last run was given, or, when none was needed (passwordless sudo), with
-/// `-n`. Only when that fails, or there is no `sudo`, does it run `systemctl
+/// Reboots the machine. With `sudo` available it uses it: with the session's
+/// password while it is held, or otherwise (passwordless sudo) with `-n`. Only when that fails, or there is no `sudo`, does it run `systemctl
 /// reboot` as the signed-in user and let the desktop's own policy decide; that
 /// is denied where there is no polkit agent, such as WSL.
 #[tauri::command]
 pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
-    let password = state.inner.lock().unwrap().sudo_password.take();
+    let password = state.session.lock().unwrap().password();
     if let Some(sudo) = find_in_path("sudo") {
         if reboot_with_sudo(sudo, password.as_deref()).is_ok() {
             return Ok(());
@@ -787,26 +1176,25 @@ pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
     }
 }
 
-/// Drops the remembered sudo password when the reboot offer is dismissed.
+/// Sends what was typed in the run panel to the running script's terminal, as
+/// a terminal sends keys: `text` as it is, then Enter when `enter` is set. A
+/// single-key question gets its key with no Enter, so nothing is left over
+/// for the next question.
 #[tauri::command]
-pub fn forget_password(state: State<'_, RunState>) {
-    state.inner.lock().unwrap().sudo_password = None;
-}
-
-/// Sends one line typed in the run panel to the running script's stdin. The
-/// partial line it answers is taken as ended, so the script's next output
-/// starts a new line, as it would after Enter in a terminal.
-#[tauri::command]
-pub fn send_input(state: State<'_, RunState>, text: String) -> Result<(), String> {
+pub fn send_input(state: State<'_, RunState>, text: String, enter: bool) -> Result<(), String> {
     let mut inner = state.inner.lock().unwrap();
+    // A terminal's Enter is CR, which the pty turns into a newline for the
+    // reader; a plain pipe gets the newline itself.
+    let end = match (enter, inner.stdin_is_pty) {
+        (false, _) => "",
+        (true, true) => "\r",
+        (true, false) => "\n",
+    };
     let stdin = inner.stdin.as_mut().ok_or("Nothing is running")?;
-    writeln!(stdin, "{text}")
+    stdin
+        .write_all(format!("{text}{end}").as_bytes())
         .and_then(|_| stdin.flush())
-        .map_err(|e| format!("Could not send the answer: {e}"))?;
-    for pending in &inner.pending {
-        pending.lock().unwrap().clear();
-    }
-    Ok(())
+        .map_err(|e| format!("Could not send the answer: {e}"))
 }
 
 /// Stops the queue and terminates the running script (SIGTERM, then SIGKILL after 5 s).
@@ -962,5 +1350,221 @@ mod tests {
         unsafe { libc::kill(sleeper, libc::SIGKILL) };
         assert!(!all_ended, "the background sleep should still hold the output");
         assert!(elapsed < Duration::from_secs(2), "waited {elapsed:?}");
+    }
+
+    /// A bash script on a fresh pty (stdin, stdout, stderr and controlling
+    /// terminal), with the app's `read` wrapper loaded, as a run starts it.
+    /// Returns the child, the master, and everything read from the master.
+    fn on_pty(script: &str) -> (std::process::Child, File, Arc<Mutex<Vec<u8>>>) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let prelude = std::env::temp_dir().join(format!(
+            "lud-prelude-{}-{}.sh",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::write(&prelude, READ_PRELUDE).unwrap();
+        let pty = Pty::open().unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", script])
+            .env("BASH_ENV", &prelude)
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::from(pty.slave.try_clone().unwrap()));
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        let Pty { master, slave } = pty;
+        drop(slave);
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let (mut reader, sink) = (master.try_clone().unwrap(), out.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        (child, master, out)
+    }
+
+    fn count(out: &Arc<Mutex<Vec<u8>>>, needle: &str) -> usize {
+        String::from_utf8_lossy(&out.lock().unwrap()).matches(needle).count()
+    }
+
+    /// Waits up to 5 s for `needle` to have appeared `times` times.
+    fn wait_for(out: &Arc<Mutex<Vec<u8>>>, needle: &str, times: usize) {
+        let start = Instant::now();
+        while count(out, needle) < times {
+            assert!(start.elapsed() < Duration::from_secs(5), "never saw {needle:?} x{times} in {:?}", text(out));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn text(out: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8_lossy(&out.lock().unwrap()).into_owned()
+    }
+
+    fn finish(mut child: std::process::Child, out: &Arc<Mutex<Vec<u8>>>, needle: &str) {
+        wait_for(out, needle, 1);
+        assert!(child.wait().unwrap().success());
+    }
+
+    /// Two single-key questions in a row (Snapper, Timeshift, Bootloader
+    /// Manager): each gets the key typed for it. Sending the key with Enter, as
+    /// the app used to, answered the second question with the leftover Enter.
+    #[test]
+    fn single_key_questions_each_get_their_own_key() {
+        let (child, mut master, out) = on_pty(
+            "read -n 1 -rp 'First? (y/N) ' a < /dev/tty; echo; \
+             read -n 1 -rp 'Second? (y/N) ' b < /dev/tty; echo; echo \"got:$a$b\"",
+        );
+        wait_for(&out, "\x1b]7701;wait;key;0\x07", 1);
+        master.write_all(b"y").unwrap();
+        wait_for(&out, "\x1b]7701;wait;key;0\x07", 2);
+        master.write_all(b"n").unwrap();
+        finish(child, &out, "got:yn");
+        assert_eq!(count(&out, "\x1b]7701;done\x07"), 2);
+    }
+
+    /// A typed answer to a line question, such as a menu number, reaches the
+    /// script and is echoed after the prompt by the terminal itself.
+    #[test]
+    fn line_question_gets_text_and_enter_and_is_echoed() {
+        let (child, mut master, out) = on_pty("read -rp 'Select (1-4): ' c < /dev/tty; echo \"got:$c\"");
+        wait_for(&out, "\x1b]7701;wait;line;0\x07", 1);
+        wait_for(&out, "Select (1-4): ", 1);
+        master.write_all(b"2\r").unwrap();
+        finish(child, &out, "got:2");
+        assert!(text(&out).contains("Select (1-4): 2"), "{:?}", text(&out));
+    }
+
+    /// A hidden question (Mount SMB Share's password) is signalled as hidden
+    /// and what is typed never comes back as output.
+    #[test]
+    fn hidden_question_is_signalled_and_not_echoed() {
+        let (child, mut master, out) =
+            on_pty("read -rsp 'Password (hidden): ' p < /dev/tty; echo; echo \"len:${#p}\"");
+        wait_for(&out, "\x1b]7701;wait;line;1\x07", 1);
+        master.write_all(b"s3cret\r").unwrap();
+        finish(child, &out, "len:6");
+        assert!(!text(&out).contains("s3cret"));
+    }
+
+    /// Reads that are not questions send no signal: a short timed read (the
+    /// Esc drain), a read from a file, a read from a pipe.
+    #[test]
+    fn reads_that_are_not_questions_send_no_signal() {
+        let file = std::env::temp_dir().join(format!("lud-read-{}", std::process::id()));
+        std::fs::write(&file, "from-file\n").unwrap();
+        let (child, _master, out) = on_pty(&format!(
+            "read -r -n 10 -t 0.05 x < /dev/tty; read -r y < {}; echo piped | {{ read -r z; echo \"z:$z\"; }}; echo \"y:$y\"",
+            shell_quote(&file.to_string_lossy())
+        ));
+        finish(child, &out, "y:from-file");
+        assert!(text(&out).contains("z:piped"));
+        assert_eq!(count(&out, "7701;"), 0, "{:?}", text(&out));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// A program other than bash's `read` that turns echo off and asks (as
+    /// `chsh` does for the password) is guessed as a hidden question once its
+    /// output has stopped, and the typed password is not echoed.
+    #[test]
+    fn password_prompt_from_another_program_is_guessed_hidden() {
+        let (child, mut master, out) =
+            on_pty("stty -echo; printf 'Password: '; builtin read -r p; stty echo; echo; echo \"len:${#p}\"");
+        wait_for(&out, "Password: ", 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let mut prompt = Prompt {
+            last_output: Some(Instant::now() - PROMPT_IDLE),
+            open_line: "Password: ".to_string(),
+            ..Prompt::default()
+        };
+        assert_eq!(prompt.idle_guess(Some(&master)), Some(("line", true)));
+        assert_eq!(prompt.idle_guess(Some(&master)), None, "offered once");
+        master.write_all(b"abc\r").unwrap();
+        finish(child, &out, "len:3");
+        assert!(!text(&out).contains("abc"));
+    }
+
+    #[test]
+    fn idle_guess_waits_for_quiet_and_a_question() {
+        let mut prompt = Prompt { last_output: Some(Instant::now()), open_line: "Continue? [y/N] ".into(), ..Prompt::default() };
+        assert_eq!(prompt.idle_guess(None), None, "output only just stopped");
+        prompt.last_output = Some(Instant::now() - PROMPT_IDLE);
+        prompt.open_line = "Downloading packages...".into();
+        assert_eq!(prompt.idle_guess(None), None, "not a question");
+        prompt.open_line = "Continue? [y/N] ".into();
+        prompt.reading = true;
+        assert_eq!(prompt.idle_guess(None), None, "bash read already signalled");
+        prompt.reading = false;
+        assert_eq!(prompt.idle_guess(None), Some(("line", false)));
+    }
+
+    #[test]
+    fn questions_are_recognised_by_their_ending() {
+        for q in ["Password: ", "Is this ok [y/N]: ", "Do you want to continue? [Y/n] ", "Select (1-4)", "> "] {
+            assert!(looks_like_question(q), "{q:?}");
+        }
+        for q in ["", "Downloading...", "  ⠋  Installing packages", "[INFO] Done"] {
+            assert!(!looks_like_question(q), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn signals_are_found_across_reads_and_removed() {
+        let mut s = Signals::default();
+        let (out, sigs) = s.feed(b"Proceed? \x1b]77");
+        assert_eq!((out.as_slice(), sigs.len()), (&b"Proceed? "[..], 0));
+        let (out, sigs) = s.feed(b"01;wait;key;0\x07rest\x1b[31mred");
+        assert_eq!(out, b"rest\x1b[31mred");
+        assert_eq!(sigs, vec!["wait;key;0".to_string()]);
+        let (out, sigs) = s.feed(b"\x1b]0;title\x07\x1b]7701;done\x07");
+        assert_eq!(out, b"\x1b]0;title\x07");
+        assert_eq!(sigs, vec!["done".to_string()]);
+    }
+
+    #[test]
+    fn utf8_cut_between_reads_is_kept_whole() {
+        let mut held = Vec::new();
+        let check = "✓ done".as_bytes();
+        assert_eq!(decode_utf8(&mut held, &check[..2]), "");
+        assert_eq!(decode_utf8(&mut held, &check[2..]), "✓ done");
+        assert_eq!(decode_utf8(&mut held, b"a\xffb"), "a\u{fffd}b");
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn sudo_timeout_is_read_from_sudo_v() {
+        let v = "Sudo version 1.9.17\nSudoers policy plugin version 1.9.17\n  Authentication timestamp timeout: 15.0 minutes\n";
+        assert_eq!(parse_sudo_timeout(v), Some(Duration::from_secs(15 * 60)));
+        assert_eq!(parse_sudo_timeout("Authentication timestamp timeout: 0.0 minutes"), Some(Duration::ZERO));
+        assert_eq!(parse_sudo_timeout("Authentication timestamp timeout: -1.0 minutes"), None);
+        assert_eq!(parse_sudo_timeout("Sudo version 1.9.17"), Some(SUDO_DEFAULT_TIMEOUT));
+    }
+
+    #[test]
+    fn session_password_times_out_only_when_idle() {
+        let mut s = Session {
+            password: Some("pw".into()),
+            timeout: Some(Duration::from_secs(60)),
+            idle_since: None,
+        };
+        assert_eq!(s.password().as_deref(), Some("pw"), "a run is going");
+        s.idle_since = Some(Instant::now() - Duration::from_secs(30));
+        assert_eq!(s.password().as_deref(), Some("pw"), "within the timeout");
+        s.idle_since = Some(Instant::now() - Duration::from_secs(61));
+        assert_eq!(s.password(), None, "timed out");
+        s.password = Some("pw".into());
+        s.timeout = None;
+        assert_eq!(s.password().as_deref(), Some("pw"), "never times out");
     }
 }
