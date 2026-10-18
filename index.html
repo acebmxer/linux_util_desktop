@@ -136,6 +136,27 @@
           <button id="logsclose" type="button">Close</button>
         </div>
       </dialog>
+      <dialog id="shortcuts" aria-labelledby="shortcutstitle">
+        <h2 id="shortcutstitle">Add shortcuts?</h2>
+        <p class="muted">Each points at this copy of the app. Nothing else is copied.</p>
+        <label class="check" id="scdesktoprow">
+          <input id="scdesktop" type="checkbox" checked />
+          <span>Desktop icon</span>
+        </label>
+        <label class="check" id="scmenurow">
+          <input id="scmenu" type="checkbox" checked />
+          <span>App menu entry</span>
+        </label>
+        <label class="check" id="sctaskbarrow">
+          <input id="sctaskbar" type="checkbox" checked />
+          <span>Taskbar icon</span>
+        </label>
+        <p id="scerr" class="error"></p>
+        <div class="buttons">
+          <button id="scskip" type="button">Don't add</button>
+          <button id="scadd" type="button" class="primary">Add</button>
+        </div>
+      </dialog>
       <dialog id="settings" aria-labelledby="settingstitle">
         <form id="settingsform">
           <h2 id="settingstitle">Settings</h2>
@@ -165,6 +186,31 @@
               <span>
                 Include beta versions
                 <small class="muted">Offers test builds from the dev branch as well as stable releases. Turn it off to get stable releases only; a beta already installed stays until a newer stable release comes out.</small>
+              </span>
+            </label>
+          </fieldset>
+          <fieldset id="shortcutfields" hidden>
+            <legend>Shortcuts</legend>
+            <p class="muted">Applied when you click Save.</p>
+            <label class="check" id="desktoprow">
+              <input id="desktopon" type="checkbox" />
+              <span>
+                Desktop icon
+                <small class="muted">Turning it off removes every icon on the desktop that opens this app.</small>
+              </span>
+            </label>
+            <label class="check" id="menurow">
+              <input id="menuon" type="checkbox" />
+              <span>
+                App menu entry
+                <small class="muted">Turning it off also removes the taskbar icon, which needs it.</small>
+              </span>
+            </label>
+            <label class="check" id="taskbarrow">
+              <input id="taskbaron" type="checkbox" />
+              <span>
+                Taskbar icon
+                <small class="muted">Pinned to KDE's Task Manager or GNOME's dash.</small>
               </span>
             </label>
           </fieldset>

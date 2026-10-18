@@ -2,6 +2,7 @@ mod actions;
 mod logs;
 mod profiles;
 mod settings;
+mod shortcuts;
 mod update;
 mod window_state;
 
@@ -311,6 +312,10 @@ pub fn run() {
             window_state::get_sidebar_width,
             window_state::set_sidebar_width,
             settings::save_settings,
+            shortcuts::shortcut_status,
+            shortcuts::shortcuts_asked,
+            shortcuts::add_shortcuts,
+            shortcuts::remove_shortcuts,
             logs::list_logs,
             logs::read_log,
             update::version_info,

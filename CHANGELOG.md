@@ -11,6 +11,15 @@ release is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **Desktop icon, taskbar icon and app menu entry.** On its first launch the
+  app offers a desktop icon, a taskbar icon on KDE or GNOME, and when run as an
+  AppImage an app menu entry too, which the AppImage never had. The desktop
+  icon and menu entry are launcher files pointing at the one installed copy.
+  The question is asked once, also after upgrading, and skipped when they are
+  already there; Settings → Shortcuts turns each one on or off.
+
 ### Changed
 
 - **The administrator password is asked once, when the app starts,** as

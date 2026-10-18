@@ -104,7 +104,7 @@ pub(crate) fn linux_util_conf_path(app: &AppHandle) -> Option<PathBuf> {
 
 /// Writes `text` to `path` through a temporary file, so a crash never leaves
 /// half a file behind.
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, text)
         .and_then(|_| std::fs::rename(&tmp, path))

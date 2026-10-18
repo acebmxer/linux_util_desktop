@@ -309,6 +309,9 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; }
 .error { color: #dc2626; }
 dialog .error { min-height: 1.2em; margin: 8px 0; }
 #removelist { max-height: 40vh; overflow: auto; margin: 0 0 16px; padding-left: 20px; }
+#shortcuts .check { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+#shortcuts .check[hidden] { display: none; }
+#shortcuts .check input { width: auto; }
 
 #list li.group {
   position: sticky;
@@ -399,6 +402,7 @@ select {
 #settings .check input { width: auto; margin-top: 3px; }
 #settings .check span { display: flex; flex-direction: column; gap: 2px; }
 #settings small { font-size: 12px; }
+#settings .check[hidden] { display: none; }
 #keys { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
 #keys dt { font-family: ui-monospace, monospace; }
 #keys dd { margin: 0; }

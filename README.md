@@ -54,6 +54,15 @@ ask before a risky step instead of asking them, verbose and debug output, and
 how long logs are kept. They are saved in the app's config folder
 (`~/.config/io.github.acebmxer.linux-util-desktop/`).
 
+On its first launch, a copy installed from a release file offers a desktop
+icon, a taskbar icon on KDE (Task Manager) or GNOME (dash), and for the
+AppImage an app menu entry too (the `.deb` and `.rpm` add the menu entry
+themselves). The desktop icon and menu entry are small launcher files pointing
+at the one installed copy; the AppImage's point at wherever the file is kept,
+so moving or renaming it breaks them. The taskbar icon pins the menu entry, so
+the AppImage's needs that on. The question is asked once; Settings → Shortcuts
+turns each one on or off later.
+
 The administrator password is asked once, when the app starts, as linux_util
 asks before its menu. It is kept in memory only, never on disk, and asked again
 only once sudo's own timeout (5 minutes unless your system sets another) has
