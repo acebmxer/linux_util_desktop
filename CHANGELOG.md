@@ -13,6 +13,11 @@ release is cut.
 
 ### Fixed
 
+- **Installers that ask a question on the terminal were cancelled.** NVIDIA
+  Drivers on Fedora asked "enable RPM Fusion now?" by reading `/dev/tty`, which
+  the app's scripts did not have, so the install failed with "No such device or
+  address". Each script now runs on its own pseudo-terminal, so those prompts
+  appear in the run panel and take your typed answer, as in a terminal.
 - **Reboot now failed on systems with passwordless sudo.** The reboot used
   `sudo` only when a password had been collected during the run, and with
   passwordless sudo none ever is. It then fell back to `systemctl reboot` as the

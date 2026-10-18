@@ -12,7 +12,9 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -35,8 +37,8 @@ struct Inner {
     pid: Option<u32>,
     /// Set while the password dialog is open; `None` means the user cancelled.
     reply: Option<mpsc::Sender<Option<String>>>,
-    /// The running script's stdin, for answers typed into the run panel.
-    stdin: Option<ChildStdin>,
+    /// The master side of the script's terminal, for answers typed into the run panel.
+    stdin: Option<File>,
     /// Output received after the last newline, per stream; see `pump`.
     pending: Vec<Arc<Mutex<Vec<u8>>>>,
     /// The sudo password the last run was given, kept in memory only so the
@@ -157,6 +159,39 @@ const READ_PRELUDE: &str = r#"read() {
     builtin read "$@"
 }
 "#;
+
+/// A pseudo-terminal for one script. linux_util's installers ask with
+/// `read ... < /dev/tty`, which only exists when the process has a controlling
+/// terminal; the app has none, so those prompts failed and the install was
+/// cancelled. The script gets the slave as stdin and controlling terminal, and
+/// answers typed in the run panel are written to the master.
+struct Pty {
+    master: File,
+    slave: File,
+}
+
+impl Pty {
+    fn open() -> std::io::Result<Self> {
+        let (mut m, mut sl) = (0, 0);
+        let rc = unsafe {
+            libc::openpty(&mut m, &mut sl, std::ptr::null_mut(), std::ptr::null(), std::ptr::null())
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (master, slave) = unsafe { (File::from_raw_fd(m), File::from_raw_fd(sl)) };
+        // The panel echoes typed answers itself, so the terminal must not.
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut t) } == 0 {
+            t.c_lflag &= !(libc::ECHO | libc::ECHONL);
+            unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &t) };
+        }
+        for f in [&master, &slave] {
+            unsafe { libc::fcntl(f.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        Ok(Pty { master, slave })
+    }
+}
 
 /// Per-run scratch directory (mode 0700) holding the shim, askpass and socket.
 struct Workdir {
@@ -496,14 +531,31 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         }
         let _ = app.emit("run-item", ItemEvent { index, name, state: "running", code: None });
         let mut cmd = make(name);
+        let pty = Pty::open().ok();
         cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
             .env("BASH_ENV", work.prelude_path())
-            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        match pty.as_ref().and_then(|p| p.slave.try_clone().ok()) {
+            Some(slave) => {
+                cmd.stdin(Stdio::from(slave));
+                // New session whose controlling terminal is the pty (fd 0, set
+                // up before this runs); its process group is then the child's pid.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            None => {
+                cmd.stdin(Stdio::piped()).process_group(0);
+            }
+        }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -518,9 +570,26 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         {
             let mut inner = state.inner.lock().unwrap();
             inner.pid = Some(child.id());
-            inner.stdin = child.stdin.take();
+            inner.stdin = match &pty {
+                Some(p) => p.master.try_clone().ok(),
+                None => None,
+            }
+            .or_else(|| {
+                // No pty: the pipe's write end, wrapped as a File.
+                child.stdin.take().map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
+            });
             inner.pending = pending.to_vec();
         }
+        // Drain what the script writes to its terminal (nothing normally) so it
+        // never blocks; reading ends with EIO once the script and its children exit.
+        let drain = pty.map(|Pty { master, slave }| {
+            drop(slave);
+            std::thread::spawn(move || {
+                let mut master = master;
+                let mut buf = [0u8; 1024];
+                while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+            })
+        });
         let [out_pending, err_pending] = pending;
         let no_changes = Arc::new(AtomicBool::new(false));
         let readers = [
@@ -535,6 +604,9 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         }
         for r in readers {
             let _ = r.join();
+        }
+        if let Some(d) = drain {
+            let _ = d.join();
         }
         let cancelled = {
             let mut inner = state.inner.lock().unwrap();
@@ -780,4 +852,36 @@ fn descendants(root: u32) -> Vec<u32> {
     }
     found.remove(0);
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A script that asks with `read < /dev/tty` (as linux_util's installers
+    /// do) gets the answer written to the pty master, with no app terminal.
+    #[test]
+    fn script_can_read_answer_from_dev_tty() {
+        let pty = Pty::open().unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "read -rp 'ok? ' a < /dev/tty && echo \"got:$a\""])
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        let Pty { mut master, slave } = pty;
+        drop(slave);
+        writeln!(master, "y").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "got:y");
+        assert!(out.status.success());
+    }
 }
