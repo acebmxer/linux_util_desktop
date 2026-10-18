@@ -601,6 +601,10 @@ pub(crate) fn clean_line(raw: &[u8]) -> String {
 /// code into exit 1, so the line is how the app tells that case from a failure.
 const NO_CHANGES_LINE: &str = "No package changes were made.";
 
+/// What `--install`/`--update` print on that exit 1 straight after
+/// `NO_CHANGES_LINE`. The app counts the item as succeeded, so it is not shown.
+const CLI_FAILED_PREFIX: &str = "Failed: ";
+
 /// How long output is still read after the script itself has exited. A process
 /// it left running in the background keeps the pipes and terminal open for as
 /// long as it lives, and the item must not stay "running" until then: in a
@@ -792,9 +796,69 @@ fn terminal_mode(master: &File) -> (&'static str, bool) {
 /// Longest line kept for the "No package changes" check; the rest is dropped.
 const MAX_LINE: usize = 64 * 1024;
 
+/// Follows output line by line for the "No package changes" line, and holds
+/// back the line after it until it is complete so a `CLI_FAILED_PREFIX` line
+/// can be dropped.
+#[derive(Default)]
+struct NoChanges {
+    line: Vec<u8>,
+    seen: bool,
+    holding: bool,
+    held: String,
+}
+
+impl NoChanges {
+    /// Returns the part of `text` to show now.
+    fn feed(&mut self, text: &str) -> String {
+        let mut shown = String::with_capacity(text.len());
+        let mut start = 0;
+        for (i, &b) in text.as_bytes().iter().enumerate() {
+            if b != b'\n' {
+                if self.line.len() < MAX_LINE {
+                    self.line.push(b);
+                }
+                continue;
+            }
+            let cleaned = clean_line(&self.line);
+            self.line.clear();
+            if self.holding {
+                self.held.push_str(&text[start..=i]);
+                start = i + 1;
+                self.holding = false;
+                let held = std::mem::take(&mut self.held);
+                if !cleaned.starts_with(CLI_FAILED_PREFIX) {
+                    shown.push_str(&held);
+                }
+            } else if cleaned.contains(NO_CHANGES_LINE) {
+                self.seen = true;
+                shown.push_str(&text[start..=i]);
+                start = i + 1;
+                self.holding = true;
+            }
+        }
+        if self.holding {
+            self.held.push_str(&text[start..]);
+        } else {
+            shown.push_str(&text[start..]);
+        }
+        shown
+    }
+
+    /// The line being held back, once the output has ended.
+    fn finish(&mut self) -> String {
+        self.holding = false;
+        std::mem::take(&mut self.held)
+    }
+
+    /// The line written so far, with nothing after it yet.
+    fn tail(&self) -> Option<String> {
+        (!self.line.is_empty()).then(|| clean_line(&self.line))
+    }
+}
+
 /// Sends `reader`'s output to the run panel as it arrives, as terminal data.
 /// Takes the `read` wrapper's signals out of it, notes the "No package changes"
-/// line, and keeps `prompt` up to date.
+/// line and drops the "Failed:" line after it, and keeps `prompt` up to date.
 fn pump<R: Read + Send + 'static>(
     app: AppHandle,
     mut reader: R,
@@ -807,7 +871,7 @@ fn pump<R: Read + Send + 'static>(
         let _done = done;
         let mut signals = Signals::default();
         let mut utf8 = Vec::new();
-        let mut line: Vec<u8> = Vec::new();
+        let mut lines = NoChanges::default();
         let mut chunk = [0u8; 4096];
         loop {
             let n = match reader.read(&mut chunk) {
@@ -824,23 +888,22 @@ fn pump<R: Read + Send + 'static>(
             let (out, sigs) = signals.feed(&chunk[..n]);
             let text = decode_utf8(&mut utf8, &out);
             if !text.is_empty() {
-                for &b in text.as_bytes() {
-                    if b == b'\n' {
-                        if clean_line(&line).contains(NO_CHANGES_LINE) {
-                            no_changes.store(true, Ordering::SeqCst);
-                        }
-                        line.clear();
-                    } else if line.len() < MAX_LINE {
-                        line.push(b);
-                    }
+                let shown = lines.feed(&text);
+                if lines.seen {
+                    no_changes.store(true, Ordering::SeqCst);
                 }
-                let _ = app.emit("run-term", TermOutput { data: &text });
-                let tail = (!line.is_empty()).then(|| clean_line(&line));
-                prompt.lock().unwrap().output(&app, tail.as_deref());
+                if !shown.is_empty() {
+                    let _ = app.emit("run-term", TermOutput { data: &shown });
+                }
+                prompt.lock().unwrap().output(&app, lines.tail().as_deref());
             }
             for signal in sigs {
                 prompt.lock().unwrap().signal(&app, &signal);
             }
+        }
+        let rest = lines.finish();
+        if !rest.is_empty() && !detached.load(Ordering::SeqCst) {
+            let _ = app.emit("run-term", TermOutput { data: &rest });
         }
     });
 }
@@ -1530,6 +1593,29 @@ mod tests {
         let (out, sigs) = s.feed(b"\x1b]0;title\x07\x1b]7701;done\x07");
         assert_eq!(out, b"\x1b]0;title\x07");
         assert_eq!(sigs, vec!["done".to_string()]);
+    }
+
+    #[test]
+    fn failed_line_after_no_changes_is_dropped() {
+        let mut n = NoChanges::default();
+        assert_eq!(n.feed("[INFO] System updates completed.\r\n[INFO] No package"), "[INFO] System updates completed.\r\n[INFO] No package");
+        assert!(!n.seen);
+        assert_eq!(n.feed(" changes were made.\r\nFail"), " changes were made.\r\n");
+        assert!(n.seen);
+        assert_eq!(n.feed("ed: System Updates\r\n"), "");
+        assert_eq!(n.finish(), "");
+
+        let mut n = NoChanges::default();
+        assert_eq!(n.feed("\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\nFailed: System Updates\r\n"), "\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\n");
+
+        // Only the line straight after it, and only a "Failed: " line.
+        let mut n = NoChanges::default();
+        assert_eq!(n.feed("No package changes were made.\nother\nFailed: X\n"), "No package changes were made.\nother\nFailed: X\n");
+        let mut n = NoChanges::default();
+        assert_eq!(n.feed("Failed: X\n"), "Failed: X\n");
+        let mut n = NoChanges::default();
+        assert_eq!(n.feed("No package changes were made.\nleft"), "No package changes were made.\n");
+        assert_eq!(n.finish(), "left");
     }
 
     #[test]

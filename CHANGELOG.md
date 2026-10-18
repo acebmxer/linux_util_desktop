@@ -26,6 +26,9 @@ release is cut.
 
 ### Fixed
 
+- **System Updates with nothing to update ended with "Failed: System
+  Updates"** in the output, although the run was counted as succeeded. That
+  line from linux_util is no longer shown after "No package changes were made."
 - **Single-key questions got the wrong answer.** Snapper, Timeshift, Bootloader
   Manager, Xen Guest Utilities and others ask for one key. The app sent the key
   with Enter, and the leftover Enter answered the next question with its
