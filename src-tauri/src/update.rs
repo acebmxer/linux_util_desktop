@@ -23,7 +23,8 @@ use crate::actions::{self, RunState};
 
 const REPO: &str = "acebmxer/linux_util_desktop";
 /// Replaces the GitHub API address for the release check and lifts the
-/// download address restriction. Only for testing against a local server.
+/// download address restriction, for testing against a local server. Read by
+/// debug builds only; a release build always uses GitHub.
 const RELEASES_URL_ENV: &str = "LU_RELEASES_URL";
 const SUMS_NAME: &str = "SHA256SUMS";
 /// Largest download accepted: the AppImage is well under this.
@@ -106,11 +107,7 @@ fn parse_release(tag: &str) -> Option<Rank> {
     let tag = tag.trim().trim_start_matches('v');
     let beta = match tag.split_once('-') {
         None => STABLE,
-        Some((_, pre)) => pre
-            .strip_prefix("beta.")
-            .and_then(|n| n.split('+').next())
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0),
+        Some((_, pre)) => pre.strip_prefix("beta.").and_then(|n| n.split('+').next()).and_then(|n| n.parse().ok()).unwrap_or(0),
     };
     Some((version, beta))
 }
@@ -140,9 +137,14 @@ fn agent(download: bool) -> ureq::Agent {
     builder.build().into()
 }
 
+/// The release check's address, and whether it is the test override.
 fn releases_url(beta: bool) -> (String, bool) {
-    match std::env::var(RELEASES_URL_ENV) {
-        Ok(url) if !url.is_empty() => (url, true),
+    releases_url_from(std::env::var(RELEASES_URL_ENV).ok(), cfg!(debug_assertions), beta)
+}
+
+fn releases_url_from(override_url: Option<String>, debug_build: bool, beta: bool) -> (String, bool) {
+    match override_url {
+        Some(url) if debug_build && !url.is_empty() => (url, true),
         // `latest` never returns a pre-release; the list does.
         _ if beta => (format!("https://api.github.com/repos/{REPO}/releases?per_page=30"), false),
         _ => (format!("https://api.github.com/repos/{REPO}/releases/latest"), false),
@@ -186,10 +188,7 @@ fn fetch_release(beta: bool) -> Result<Release, String> {
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("Could not check for updates: {e}"))?;
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("Could not read the release information: {e}"))?;
+    let text = response.body_mut().read_to_string().map_err(|e| format!("Could not read the release information: {e}"))?;
     let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
     match doc.as_array() {
         None => release_from(&doc, overridden),
@@ -243,8 +242,7 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let (hash, file) = line.split_once(char::is_whitespace)?;
         let file = file.trim_start().trim_start_matches('*');
-        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| hash.to_ascii_lowercase())
+        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
     })
 }
 
@@ -335,20 +333,14 @@ impl Scratch {
         std::fs::create_dir_all(&base).map_err(|e| format!("Could not create {}: {e}", base.display()))?;
         let dir = base.join(format!("update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
         Ok(Scratch(dir))
     }
 
     /// A new private folder inside `base`. Created exclusively under a fresh
     /// name, so nothing another user put in `base` can be reused or followed.
     fn new_in(base: &Path) -> Result<Self, String> {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
         let mut last = None;
         for n in 0..16 {
             let dir = base.join(format!(".linux-util-desktop-update-{}-{stamp}-{n}", std::process::id()));
@@ -578,6 +570,17 @@ mod tests {
         assert!(!download_allowed("https://github.com/other/repo/releases/download/v1/x.deb", false));
         assert!(!download_allowed("http://example.com/x.deb", false));
         assert!(download_allowed("http://127.0.0.1:1/x.deb", true));
+    }
+
+    #[test]
+    fn release_builds_ignore_the_test_address() {
+        let local = Some("http://127.0.0.1:1/releases/latest".to_string());
+        let github = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        assert_eq!(releases_url_from(local.clone(), false, false), (github.clone(), false));
+        assert_eq!(releases_url_from(local.clone(), true, false), (local.clone().unwrap(), true));
+        assert_eq!(releases_url_from(Some(String::new()), true, false), (github.clone(), false));
+        assert_eq!(releases_url_from(None, true, false), (github, false));
+        assert!(!releases_url_from(local, false, true).1);
     }
 
     #[test]

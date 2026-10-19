@@ -790,6 +790,12 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
 
 let settings: Settings = { theme: "system", check_updates: true, beta_updates: false, linux_util: {} };
 
+// auto_confirm skips installer questions, so say so where runs start.
+function showAutoConfirm(s: Settings) {
+  $("autoconfirm").hidden = s.linux_util.auto_confirm !== "true";
+}
+$("autoconfirm").addEventListener("click", () => $("opensettings").click());
+
 function applyTheme(theme: Theme) {
   if (theme === "system") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = theme;
@@ -860,6 +866,7 @@ $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
     await invoke("save_settings", { settings: next });
     settings = next;
     applyTheme(settings.theme);
+    showAutoConfirm(settings);
     await applyShortcuts();
     $<HTMLDialogElement>("settings").close();
   } catch (e) {
@@ -1272,6 +1279,7 @@ function saveSidebarWidth() {
 invoke<Settings>("get_settings").then((s) => {
   settings = s;
   applyTheme(s.theme);
+  showAutoConfirm(s);
   if (s.check_updates) checkUpdate(false);
 });
 invoke<string | null>("detected_distro").then((d) => {

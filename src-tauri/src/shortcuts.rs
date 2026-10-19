@@ -74,9 +74,8 @@ fn launches_app(file: &Path) -> bool {
     if file.file_name().is_some_and(|n| n == LAUNCHER) {
         return true;
     }
-    std::fs::read_to_string(file).is_ok_and(|text| {
-        text.lines().any(|l| l.strip_prefix("Exec=").is_some_and(|v| v.contains("linux_util_desktop")))
-    })
+    std::fs::read_to_string(file)
+        .is_ok_and(|text| text.lines().any(|l| l.strip_prefix("Exec=").is_some_and(|v| v.contains("linux_util_desktop"))))
 }
 
 /// The launchers for this app in `dir`. A link counts, as "Add to Desktop" in
@@ -109,12 +108,7 @@ fn menu_launcher(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn icon_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app
-        .path()
-        .data_dir()
-        .map_err(|e| format!("No data directory: {e}"))?
-        .join("icons/hicolor/128x128/apps")
-        .join(ICON_NAME))
+    Ok(app.path().data_dir().map_err(|e| format!("No data directory: {e}"))?.join("icons/hicolor/128x128/apps").join(ICON_NAME))
 }
 
 #[derive(Serialize)]
@@ -224,8 +218,7 @@ fn launcher_text(app: &AppHandle) -> Result<String, String> {
                 std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
             }
             std::fs::write(&icon, ICON).map_err(|e| format!("Could not write {}: {e}", icon.display()))?;
-            appimage_launcher(&appimage, &icon)
-                .ok_or_else(|| format!("{} cannot be used in a launcher.", appimage.display()))
+            appimage_launcher(&appimage, &icon).ok_or_else(|| format!("{} cannot be used in a launcher.", appimage.display()))
         }
     }
 }

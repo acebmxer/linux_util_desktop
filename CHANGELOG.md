@@ -18,7 +18,10 @@ release is cut.
   AppImage an app menu entry too, which the AppImage never had. The desktop
   icon and menu entry are launcher files pointing at the one installed copy.
   The question is asked once, also after upgrading, and skipped when they are
-  already there; Settings → Shortcuts turns each one on or off.
+  already there;  Settings → Shortcuts turns each one on or off.
+- **The main window shows when installer questions are answered for you**
+  (#13). While Settings → "Answer yes to installer questions" is on, "Answering
+  yes to questions" appears next to Dry run; clicking it opens Settings.
 
 ### Changed
 
@@ -32,6 +35,9 @@ release is cut.
   The answer box appears only while a question is waiting: a line or menu
   number with Enter, a single key on its own, or a hidden answer such as a
   password.
+- **CI now runs the tests and linters** (#11): `cargo test`, `cargo clippy`
+  with warnings as errors, `cargo fmt --check` and `shellcheck`, besides the
+  build. The Rust code was reformatted once to the new `src-tauri/rustfmt.toml`.
 
 ### Fixed
 
@@ -74,6 +80,25 @@ release is cut.
   graphics driver, so nothing opened from the terminal or the Windows Start
   menu. On WSL the app now renders in software, unless `LIBGL_ALWAYS_SOFTWARE`
   or `WEBKIT_DISABLE_COMPOSITING_MODE` is already set in the environment.
+- **One internal error could break every later action** (#13). If a
+  background task failed while holding the app's run state, each later click
+  (run, cancel, answer, reboot) failed too until the app was restarted. The app
+  now carries on with that state.
+
+### Security
+
+- **The administrator password goes only to the app's own runs** (#8). While a
+  run was going, any program of the same user could connect to the app's
+  password socket and be handed the password. The app now asks the kernel who
+  connected and answers only processes it started itself; any other program
+  gets nothing, and the run's own sudo still gets the password after it.
+- **Release builds no longer read `LU_RELEASES_URL`** (#10). The variable
+  pointed the update check at another server and let it download from any
+  address; it was meant for testing only. Only debug builds read it now; a
+  release build always checks and downloads from this repo's GitHub releases.
+- **The app window has a Content Security Policy** (#13). It loads scripts,
+  styles and images only from the app itself and talks only to the app's own
+  backend, where before no policy was set.
 
 ## [0.2.1] - 2026-10-15
 

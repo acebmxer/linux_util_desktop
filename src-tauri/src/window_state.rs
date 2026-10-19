@@ -25,10 +25,7 @@ fn path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn load(app: &AppHandle) -> State {
-    path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    path(app).and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
 fn store(app: &AppHandle, state: &State) -> Result<(), String> {
@@ -38,9 +35,7 @@ fn store(app: &AppHandle, state: &State) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, json)
-        .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+    std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
 /// Applies the remembered size to the main window. Called once at startup.

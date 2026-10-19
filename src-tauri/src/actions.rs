@@ -13,16 +13,16 @@
 //! window. The run panel draws that terminal's output and shows the answer box
 //! only while a question is waiting.
 
+use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::fs::File;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -30,6 +30,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const OPS: [&str; 3] = ["install", "uninstall", "update"];
 const SOCKET_ENV: &str = "LU_ASKPASS_SOCK";
+
+/// Locks `m`. If a thread panicked while holding it, the data is still used:
+/// every field here stays valid between statements, and refusing the lock
+/// would make every later command panic too.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Default)]
 pub struct RunState {
@@ -138,9 +145,7 @@ pub fn askpass_client() -> ! {
 }
 
 pub(crate) fn find_in_path(program: &str) -> Option<PathBuf> {
-    std::env::split_paths(&crate::host_var("PATH")?)
-        .map(|d| d.join(program))
-        .find(|p| p.is_file())
+    std::env::split_paths(&crate::host_var("PATH")?).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
 fn shell_quote(s: &str) -> String {
@@ -299,18 +304,10 @@ struct Workdir {
 
 impl Workdir {
     fn create(real_sudo: &Path) -> Result<Self, String> {
-        let base = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
+        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
         let root = base.join(format!("linux-util-desktop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let mk = |p: &Path| {
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(p)
-                .map_err(|e| format!("Could not create {}: {e}", p.display()))
-        };
+        let mk = |p: &Path| std::fs::DirBuilder::new().mode(0o700).create(p).map_err(|e| format!("Could not create {}: {e}", p.display()));
         mk(&root)?;
         let work = Workdir { root };
         mk(&work.bin_dir())?;
@@ -318,8 +315,7 @@ impl Workdir {
         let exe = std::env::current_exe().map_err(|e| format!("Cannot find own executable: {e}"))?;
         let write_exec = |p: PathBuf, body: String| -> Result<(), String> {
             std::fs::write(&p, body).map_err(|e| format!("Could not write {}: {e}", p.display()))?;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| e.to_string())
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())
         };
         write_exec(
             work.bin_dir().join("sudo"),
@@ -335,12 +331,8 @@ impl Workdir {
             }
             _ => String::new(),
         };
-        write_exec(
-            work.askpass_path(),
-            format!("#!/bin/sh\n{libs}exec {} --askpass \"$@\"\n", shell_quote(&exe.to_string_lossy())),
-        )?;
-        std::fs::write(work.prelude_path(), READ_PRELUDE)
-            .map_err(|e| format!("Could not write {}: {e}", work.prelude_path().display()))?;
+        write_exec(work.askpass_path(), format!("#!/bin/sh\n{libs}exec {} --askpass \"$@\"\n", shell_quote(&exe.to_string_lossy())))?;
+        std::fs::write(work.prelude_path(), READ_PRELUDE).map_err(|e| format!("Could not write {}: {e}", work.prelude_path().display()))?;
         Ok(work)
     }
     fn prelude_path(&self) -> PathBuf {
@@ -367,12 +359,7 @@ impl Drop for Workdir {
 fn password_ok(real_sudo: &Path, password: &str) -> bool {
     let mut cmd = Command::new(real_sudo);
     crate::use_host_env(&mut cmd);
-    let Ok(mut child) = cmd
-        .args(["-S", "-k", "-v", "-p", ""])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let Ok(mut child) = cmd.args(["-S", "-k", "-v", "-p", ""]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
     else {
         return false;
     };
@@ -437,7 +424,7 @@ fn ask_password(app: &AppHandle, real_sudo: &Path) -> Option<String> {
     let mut error = None;
     let answer = loop {
         let (tx, rx) = mpsc::channel();
-        state.inner.lock().unwrap().reply = Some(tx);
+        lock(&state.inner).reply = Some(tx);
         let _ = app.emit("askpass-request", AskpassRequest { error: error.take() });
         match rx.recv() {
             Ok(Some(pw)) if password_ok(real_sudo, &pw) => break Some(pw),
@@ -445,7 +432,7 @@ fn ask_password(app: &AppHandle, real_sudo: &Path) -> Option<String> {
             _ => break None,
         }
     };
-    state.inner.lock().unwrap().reply = None;
+    lock(&state.inner).reply = None;
     let _ = app.emit("askpass-close", ());
     answer
 }
@@ -454,16 +441,70 @@ fn ask_password(app: &AppHandle, real_sudo: &Path) -> Option<String> {
 /// starts now.
 fn keep_password(state: &RunState, real_sudo: &Path, password: String) {
     let timeout = sudo_timeout(real_sudo, &password);
-    let running = state.inner.lock().unwrap().running;
-    let mut session = state.session.lock().unwrap();
+    let running = lock(&state.inner).running;
+    let mut session = lock(&state.session);
     session.password = Some(password);
     session.timeout = timeout;
     session.idle_since = if running { None } else { Some(Instant::now()) };
 }
 
+/// The pid and uid of the process that connected `stream`, from the kernel.
+fn peer_cred(stream: &UnixStream) -> Option<(u32, u32)> {
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len)
+    };
+    (rc == 0 && cred.pid > 0).then_some((cred.pid as u32, cred.uid))
+}
+
+/// The parent of `pid`, from `/proc/<pid>/stat`.
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name in parentheses may hold spaces; the parent pid is the
+    // second field after its closing bracket.
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// True when `pid` is a child, grandchild and so on of `ancestor`.
+fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let mut current = pid;
+    // Bounded, in case /proc changes under us and a loop appears.
+    for _ in 0..4096 {
+        match parent_pid(current) {
+            Some(p) if p == ancestor => return true,
+            Some(p) if p > 1 => current = p,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Answers one askpass connection: with the password when the client is ours
+/// (same user, and started from `root`, so a step of the run), with nothing
+/// otherwise. `password` gives the session's password, asking if needed, and
+/// is only called for our own clients. Returns false when it gave none (the
+/// dialog was cancelled), which denies the rest of the run; a stray client
+/// never does, so it cannot block the real sudo.
+fn answer_askpass(stream: &mut UnixStream, root: u32, password: &mut dyn FnMut() -> Option<String>) -> bool {
+    let ours = peer_cred(stream).is_some_and(|(pid, uid)| uid == unsafe { libc::getuid() } && descends_from(pid, root));
+    if !ours {
+        return true; // dropping the stream makes that askpass exit 1
+    }
+    match password() {
+        Some(pw) => {
+            let _ = stream.write_all(pw.as_bytes());
+            true
+        }
+        None => false,
+    }
+}
+
 /// Answers each askpass request from the session's password, asking for it
 /// (once) when none is held. After a cancel, the rest of the run's requests
-/// fail without asking again.
+/// fail without asking again. Only processes the app started are answered:
+/// the socket's 0700 directory keeps other users out, and this keeps out
+/// other programs of the same user.
 fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, stop: Arc<AtomicBool>) {
     let state = app.state::<RunState>();
     let mut denied = false;
@@ -480,18 +521,13 @@ fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: PathBuf, sto
         if denied {
             continue; // dropping the stream makes askpass exit 1
         }
-        let held = state.session.lock().unwrap().password();
-        let password = held.or_else(|| {
-            let pw = ask_password(&app, &real_sudo)?;
-            keep_password(&state, &real_sudo, pw.clone());
-            Some(pw)
+        denied = !answer_askpass(&mut stream, std::process::id(), &mut || {
+            lock(&state.session).password().or_else(|| {
+                let pw = ask_password(&app, &real_sudo)?;
+                keep_password(&state, &real_sudo, pw.clone());
+                Some(pw)
+            })
         });
-        match password {
-            Some(pw) => {
-                let _ = stream.write_all(pw.as_bytes());
-            }
-            None => denied = true,
-        }
     }
 }
 
@@ -531,11 +567,7 @@ fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
 
 /// Where actions run linux_util from; its `logs/` directory is inside.
 pub(crate) fn staged_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("No app data directory: {e}"))?
-        .join("linux_util"))
+    Ok(app.path().app_data_dir().map_err(|e| format!("No app data directory: {e}"))?.join("linux_util"))
 }
 
 /// `linux_util.sh` writes `logs/` next to itself, and the bundled copy may sit
@@ -547,10 +579,7 @@ fn staged_script(app: &AppHandle, bundled: &Path) -> Result<PathBuf, String> {
     // The size of the script is part of the stamp so an edited bundled script
     // is re-staged even when the version number has not moved.
     let size = std::fs::metadata(src.join("linux_util.sh")).map(|m| m.len()).unwrap_or(0);
-    let version = format!(
-        "{} {size}",
-        std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default().trim()
-    );
+    let version = format!("{} {size}", std::fs::read_to_string(src.join("linux_util.VERSION")).unwrap_or_default().trim());
     let marker = dest.join(".staged-version");
     let current = std::fs::read_to_string(&marker).ok();
     if current.as_deref() != Some(version.trim()) || !dest.join("linux_util.sh").is_file() {
@@ -895,10 +924,10 @@ fn pump<R: Read + Send + 'static>(
                 if !shown.is_empty() {
                     let _ = app.emit("run-term", TermOutput { data: &shown });
                 }
-                prompt.lock().unwrap().output(&app, lines.tail().as_deref());
+                lock(&prompt).output(&app, lines.tail().as_deref());
             }
             for signal in sigs {
-                prompt.lock().unwrap().signal(&app, &signal);
+                lock(&prompt).signal(&app, &signal);
             }
         }
         let rest = lines.finish();
@@ -914,7 +943,7 @@ fn watch_prompt(app: AppHandle, prompt: Arc<Mutex<Prompt>>, master: Option<File>
     std::thread::spawn(move || {
         while !finished.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(150));
-            prompt.lock().unwrap().check_idle(&app, master.as_ref());
+            lock(&prompt).check_idle(&app, master.as_ref());
         }
         Prompt::hide(&app);
     });
@@ -943,7 +972,7 @@ pub(crate) fn emit_done(app: &AppHandle, ok: usize, failed: usize, cancelled: bo
 
 /// True once the user pressed Cancel during the current run.
 pub(crate) fn is_cancelled(app: &AppHandle) -> bool {
-    app.state::<RunState>().inner.lock().unwrap().cancelled
+    lock(&app.state::<RunState>().inner).cancelled
 }
 
 /// Runs the commands `make` builds, one per name, with a `sudo` that asks the
@@ -955,9 +984,8 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     let (mut ok, mut failed) = (0, 0);
 
     let real_sudo = find_in_path("sudo");
-    let setup = real_sudo
-        .ok_or_else(|| "sudo was not found on PATH".to_string())
-        .and_then(|sudo| Workdir::create(&sudo).map(|w| (sudo, w)));
+    let setup =
+        real_sudo.ok_or_else(|| "sudo was not found on PATH".to_string()).and_then(|sudo| Workdir::create(&sudo).map(|w| (sudo, w)));
     let (real_sudo, work) = match setup {
         Ok(v) => v,
         Err(e) => {
@@ -969,7 +997,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     {
         // The run starts now: let a timed-out password go, then hold the rest
         // until it ends.
-        let mut session = state.session.lock().unwrap();
+        let mut session = lock(&state.session);
         session.password();
         session.idle_since = None;
     }
@@ -986,7 +1014,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     }
 
     for (index, name) in names.iter().enumerate() {
-        if state.inner.lock().unwrap().cancelled {
+        if lock(&state.inner).cancelled {
             let _ = app.emit("run-item", ItemEvent { index, name, state: "cancelled", code: None });
             continue;
         }
@@ -1001,16 +1029,11 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             .env("PAGER", "cat")
             .env("SYSTEMD_PAGER", "cat")
             .env("GIT_PAGER", "cat");
-        let slaves = pty.as_ref().and_then(|p| {
-            Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?])
-        });
+        let slaves = pty.as_ref().and_then(|p| Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?]));
         let on_pty = slaves.is_some();
         match slaves {
             Some([stdin, stdout, stderr]) => {
-                cmd.env("TERM", "xterm-256color")
-                    .stdin(Stdio::from(stdin))
-                    .stdout(Stdio::from(stdout))
-                    .stderr(Stdio::from(stderr));
+                cmd.env("TERM", "xterm-256color").stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
                 // New session whose controlling terminal is the pty (fd 0, set
                 // up before this runs); its process group is then the child's pid.
                 unsafe {
@@ -1038,7 +1061,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         };
         let pty = pty.filter(|_| on_pty);
         {
-            let mut inner = state.inner.lock().unwrap();
+            let mut inner = lock(&state.inner);
             inner.pid = Some(child.id());
             inner.stdin_is_pty = pty.is_some();
             inner.stdin = match &pty {
@@ -1075,14 +1098,15 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         drop(done_tx);
         watch_prompt(app.clone(), prompt, master_for_mode, finished.clone());
         let status = child.wait();
-        state.inner.lock().unwrap().stdin = None; // closing it lets a child left reading stdin see EOF
+        // Closing it lets a child left reading stdin see EOF.
+        lock(&state.inner).stdin = None;
         // Readers still going after this belong to a background process the
         // script left behind; they carry on, detached, until it closes them.
         wait_for_readers(&done_rx, OUTPUT_GRACE);
         detached.store(true, Ordering::SeqCst);
         finished.store(true, Ordering::SeqCst);
         let cancelled = {
-            let mut inner = state.inner.lock().unwrap();
+            let mut inner = lock(&state.inner);
             inner.pid = None;
             inner.cancelled
         };
@@ -1106,21 +1130,15 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     if let Some(server) = server {
         let _ = server.join();
     }
-    state.session.lock().unwrap().idle_since = Some(Instant::now());
-    let cancelled = state.inner.lock().unwrap().cancelled;
+    lock(&state.session).idle_since = Some(Instant::now());
+    let cancelled = lock(&state.inner).cancelled;
     let _ = app.emit("run-done", Done { ok, failed, cancelled });
 }
 
 /// Starts a queue of `op` runs, one utility at a time. Progress arrives as the
 /// `run-item`, `run-output`, `askpass-request` and `run-done` events.
 #[tauri::command]
-pub fn run_action(
-    app: AppHandle,
-    state: State<'_, RunState>,
-    op: String,
-    names: Vec<String>,
-    dry_run: bool,
-) -> Result<(), String> {
+pub fn run_action(app: AppHandle, state: State<'_, RunState>, op: String, names: Vec<String>, dry_run: bool) -> Result<(), String> {
     if !OPS.contains(&op.as_str()) {
         return Err(format!("Unknown action: {op}"));
     }
@@ -1149,7 +1167,7 @@ pub(crate) fn spawn_run(
     work: impl FnOnce(&AppHandle) + Send + 'static,
 ) -> Result<(), String> {
     {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = lock(&state.inner);
         if inner.running {
             return Err("Another action is already running".to_string());
         }
@@ -1158,7 +1176,7 @@ pub(crate) fn spawn_run(
     let app = app.clone();
     std::thread::spawn(move || {
         work(&app);
-        app.state::<RunState>().inner.lock().unwrap().running = false;
+        lock(&app.state::<RunState>().inner).running = false;
     });
     Ok(())
 }
@@ -1166,7 +1184,7 @@ pub(crate) fn spawn_run(
 /// The password dialog's answer; `None` means the user cancelled it.
 #[tauri::command]
 pub fn askpass_reply(state: State<'_, RunState>, password: Option<String>) {
-    if let Some(tx) = state.inner.lock().unwrap().reply.take() {
+    if let Some(tx) = lock(&state.inner).reply.take() {
         let _ = tx.send(password);
     }
 }
@@ -1218,7 +1236,7 @@ fn reboot_with_sudo(sudo: PathBuf, password: Option<&str>) -> Result<(), String>
 /// is denied where there is no polkit agent, such as WSL.
 #[tauri::command]
 pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
-    let password = state.session.lock().unwrap().password();
+    let password = lock(&state.session).password();
     if let Some(sudo) = find_in_path("sudo") {
         if reboot_with_sudo(sudo, password.as_deref()).is_ok() {
             return Ok(());
@@ -1227,11 +1245,7 @@ pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
     let mut cmd = Command::new("systemctl");
     cmd.arg("reboot");
     crate::use_host_env(&mut cmd);
-    let out = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Could not run the reboot command: {e}"))?;
+    let out = cmd.stdout(Stdio::null()).stderr(Stdio::piped()).output().map_err(|e| format!("Could not run the reboot command: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -1245,7 +1259,7 @@ pub fn reboot_now(state: State<'_, RunState>) -> Result<(), String> {
 /// for the next question.
 #[tauri::command]
 pub fn send_input(state: State<'_, RunState>, text: String, enter: bool) -> Result<(), String> {
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = lock(&state.inner);
     // A terminal's Enter is CR, which the pty turns into a newline for the
     // reader; a plain pipe gets the newline itself.
     let end = match (enter, inner.stdin_is_pty) {
@@ -1254,17 +1268,14 @@ pub fn send_input(state: State<'_, RunState>, text: String, enter: bool) -> Resu
         (true, false) => "\n",
     };
     let stdin = inner.stdin.as_mut().ok_or("Nothing is running")?;
-    stdin
-        .write_all(format!("{text}{end}").as_bytes())
-        .and_then(|_| stdin.flush())
-        .map_err(|e| format!("Could not send the answer: {e}"))
+    stdin.write_all(format!("{text}{end}").as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("Could not send the answer: {e}"))
 }
 
 /// Stops the queue and terminates the running script (SIGTERM, then SIGKILL after 5 s).
 #[tauri::command]
 pub fn cancel_run(state: State<'_, RunState>) {
     let pid = {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = lock(&state.inner);
         if !inner.running {
             return;
         }
@@ -1304,13 +1315,7 @@ fn descendants(root: u32) -> Vec<u32> {
             let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
                 continue;
             };
-            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-                continue;
-            };
-            // The command name in parentheses may hold spaces; the parent pid
-            // is the second field after its closing bracket.
-            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
-            if let Some(ppid) = rest.split_whitespace().nth(1).and_then(|s| s.parse::<u32>().ok()) {
+            if let Some(ppid) = parent_pid(pid) {
                 parent_of.push((pid, ppid));
             }
         }
@@ -1329,6 +1334,146 @@ fn descendants(root: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connected pair on a fresh socket path; the client end is this
+    /// process, so its peer pid is our own.
+    fn socket_pair(tag: &str) -> (UnixStream, UnixStream, PathBuf) {
+        let path = std::env::temp_dir().join(format!("lud-askpass-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (server, client, path)
+    }
+
+    #[test]
+    fn askpass_peer_is_read_from_the_socket() {
+        let (server, _client, path) = socket_pair("cred");
+        let (pid, uid) = peer_cred(&server).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(pid, std::process::id());
+        assert_eq!(uid, unsafe { libc::getuid() });
+    }
+
+    #[test]
+    fn descent_is_followed_through_parents() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let me = std::process::id();
+        assert!(descends_from(child.id(), me));
+        assert!(descends_from(me, std::os::unix::process::parent_id()));
+        assert!(!descends_from(me, me), "a process is not its own descendant");
+        assert!(!descends_from(me, child.id()));
+        assert!(!descends_from(1, me));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn askpass_answers_only_the_runs_own_processes() {
+        let parent = std::os::unix::process::parent_id();
+        let me = std::process::id();
+        // Asked from inside the run's tree: the password is sent.
+        let (mut server, mut client, path) = socket_pair("ok");
+        let mut asked = 0;
+        assert!(answer_askpass(&mut server, parent, &mut || {
+            asked += 1;
+            Some("pw".to_string())
+        }));
+        drop(server);
+        let mut got = String::new();
+        client.read_to_string(&mut got).unwrap();
+        assert_eq!((got.as_str(), asked), ("pw", 1));
+        std::fs::remove_file(path).unwrap();
+
+        // Asked from outside it: nothing is sent, the password is never
+        // looked up, and the run is not marked denied.
+        let (mut server, mut client, path) = socket_pair("stray");
+        assert!(answer_askpass(&mut server, me, &mut || panic!("a stray client must not reach the password")));
+        drop(server);
+        let mut got = String::new();
+        client.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "");
+        std::fs::remove_file(path).unwrap();
+
+        // A cancelled dialog denies the run.
+        let (mut server, _client, path) = socket_pair("cancel");
+        assert!(!answer_askpass(&mut server, parent, &mut || None));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Real sudo asking through the real askpass client. Needs a sudo that
+    /// wants a password, so it runs only when asked, in a throwaway container:
+    /// `LUD_APP_BIN=<built app> LUD_SUDO_TEST_PASSWORD=<that user's password>
+    /// cargo test --lib real_sudo -- --ignored`
+    #[test]
+    #[ignore]
+    fn real_sudo_gets_the_password_only_inside_the_run() {
+        let app_bin = std::env::var("LUD_APP_BIN").expect("LUD_APP_BIN");
+        let password = std::env::var("LUD_SUDO_TEST_PASSWORD").expect("LUD_SUDO_TEST_PASSWORD");
+        let dir = std::env::temp_dir().join(format!("lud-real-sudo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let askpass = dir.join("askpass");
+        std::fs::write(&askpass, format!("#!/bin/sh\nexec {} --askpass \"$@\"\n", shell_quote(&app_bin))).unwrap();
+        std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let answered = Arc::new(Mutex::new(0));
+        let server = {
+            let (stop, answered) = (stop.clone(), answered.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    answer_askpass(&mut stream, std::process::id(), &mut || {
+                        *lock(&answered) += 1;
+                        Some(password.clone())
+                    });
+                }
+            })
+        };
+        let run = |script: &str| {
+            Command::new("sh").arg("-c").arg(script).env("SUDO_ASKPASS", &askpass).env(SOCKET_ENV, &socket).status().unwrap().success()
+        };
+        // `-k` drops cached credentials, so every one of these must ask.
+        assert!(run("sudo -k -A true"), "direct");
+        assert!(run("timeout 20 sudo -k -A true"), "inside timeout");
+        assert!(run("bash -c 'bash -c \"sudo -k -A true\"'"), "nested scripts");
+        // Left running after its parent exits, so no longer in the tree.
+        let result = dir.join("stray");
+        assert!(run(&format!("(sleep 1; sudo -k -A true; echo $? > {}) & exit 0", shell_quote(&result.to_string_lossy()))));
+        let started = Instant::now();
+        while !result.exists() && started.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let stray = std::fs::read_to_string(&result).unwrap();
+        assert_ne!(stray.trim(), "0", "a process outside the run got the password");
+        assert!(run("sudo -k -A true"), "a real request after the stray one");
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(*lock(&answered), 4, "only the four requests from inside the run were answered");
+    }
+
+    #[test]
+    fn lock_carries_on_after_a_panic_while_held() {
+        let m = Arc::new(Mutex::new(1));
+        let held = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        *lock(&m) += 1;
+        assert_eq!(*lock(&m), 2);
+    }
 
     /// A script that asks with `read < /dev/tty` (as linux_util's installers
     /// do) gets the answer written to the pty master, with no app terminal.
@@ -1420,11 +1565,7 @@ mod tests {
     /// Returns the child, the master, and everything read from the master.
     fn on_pty(script: &str) -> (std::process::Child, File, Arc<Mutex<Vec<u8>>>) {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let prelude = std::env::temp_dir().join(format!(
-            "lud-prelude-{}-{}.sh",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst)
-        ));
+        let prelude = std::env::temp_dir().join(format!("lud-prelude-{}-{}.sh", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         std::fs::write(&prelude, READ_PRELUDE).unwrap();
         let pty = Pty::open().unwrap();
         let mut cmd = Command::new("bash");
@@ -1513,8 +1654,7 @@ mod tests {
     /// and what is typed never comes back as output.
     #[test]
     fn hidden_question_is_signalled_and_not_echoed() {
-        let (child, mut master, out) =
-            on_pty("read -rsp 'Password (hidden): ' p < /dev/tty; echo; echo \"len:${#p}\"");
+        let (child, mut master, out) = on_pty("read -rsp 'Password (hidden): ' p < /dev/tty; echo; echo \"len:${#p}\"");
         wait_for(&out, "\x1b]7701;wait;line;1\x07", 1);
         master.write_all(b"s3cret\r").unwrap();
         finish(child, &out, "len:6");
@@ -1542,15 +1682,11 @@ mod tests {
     /// output has stopped, and the typed password is not echoed.
     #[test]
     fn password_prompt_from_another_program_is_guessed_hidden() {
-        let (child, mut master, out) =
-            on_pty("stty -echo; printf 'Password: '; builtin read -r p; stty echo; echo; echo \"len:${#p}\"");
+        let (child, mut master, out) = on_pty("stty -echo; printf 'Password: '; builtin read -r p; stty echo; echo; echo \"len:${#p}\"");
         wait_for(&out, "Password: ", 1);
         std::thread::sleep(Duration::from_millis(100));
-        let mut prompt = Prompt {
-            last_output: Some(Instant::now() - PROMPT_IDLE),
-            open_line: "Password: ".to_string(),
-            ..Prompt::default()
-        };
+        let mut prompt =
+            Prompt { last_output: Some(Instant::now() - PROMPT_IDLE), open_line: "Password: ".to_string(), ..Prompt::default() };
         assert_eq!(prompt.idle_guess(Some(&master)), Some(("line", true)));
         assert_eq!(prompt.idle_guess(Some(&master)), None, "offered once");
         master.write_all(b"abc\r").unwrap();
@@ -1598,7 +1734,10 @@ mod tests {
     #[test]
     fn failed_line_after_no_changes_is_dropped() {
         let mut n = NoChanges::default();
-        assert_eq!(n.feed("[INFO] System updates completed.\r\n[INFO] No package"), "[INFO] System updates completed.\r\n[INFO] No package");
+        assert_eq!(
+            n.feed("[INFO] System updates completed.\r\n[INFO] No package"),
+            "[INFO] System updates completed.\r\n[INFO] No package"
+        );
         assert!(!n.seen);
         assert_eq!(n.feed(" changes were made.\r\nFail"), " changes were made.\r\n");
         assert!(n.seen);
@@ -1606,7 +1745,10 @@ mod tests {
         assert_eq!(n.finish(), "");
 
         let mut n = NoChanges::default();
-        assert_eq!(n.feed("\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\nFailed: System Updates\r\n"), "\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\n");
+        assert_eq!(
+            n.feed("\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\nFailed: System Updates\r\n"),
+            "\x1b[1;34m[INFO]\x1b[0m No package changes were made.\r\n"
+        );
 
         // Only the line straight after it, and only a "Failed: " line.
         let mut n = NoChanges::default();
@@ -1639,11 +1781,7 @@ mod tests {
 
     #[test]
     fn session_password_times_out_only_when_idle() {
-        let mut s = Session {
-            password: Some("pw".into()),
-            timeout: Some(Duration::from_secs(60)),
-            idle_since: None,
-        };
+        let mut s = Session { password: Some("pw".into()), timeout: Some(Duration::from_secs(60)), idle_since: None };
         assert_eq!(s.password().as_deref(), Some("pw"), "a run is going");
         s.idle_since = Some(Instant::now() - Duration::from_secs(30));
         assert_eq!(s.password().as_deref(), Some("pw"), "within the timeout");

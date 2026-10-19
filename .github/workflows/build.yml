@@ -16,6 +16,8 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -30,4 +32,8 @@ jobs:
       - run: npm install
       - run: npm run contract
       - run: npm run build
+      - run: shellcheck scripts/*.sh
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo build --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml

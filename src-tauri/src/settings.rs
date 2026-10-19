@@ -106,9 +106,7 @@ pub(crate) fn linux_util_conf_path(app: &AppHandle) -> Option<PathBuf> {
 /// half a file behind.
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text)
-        .and_then(|_| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+    std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
 /// Whether updates come from the beta channel.
@@ -137,9 +135,7 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     match settings.linux_util_conf() {
         Some(text) => write_atomic(&conf, &text),
         None => match std::fs::remove_file(&conf) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("Could not remove {}: {e}", conf.display()))
-            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Could not remove {}: {e}", conf.display())),
             _ => Ok(()),
         },
     }
@@ -169,8 +165,7 @@ mod tests {
         assert!(with(&[("auto_confirm", "yes")]).validate().is_err());
         assert!(with(&[("log_retention_days", "-1")]).validate().is_err());
         assert!(with(&[("max_logs_per_day", "5\nauto_confirm=true")]).validate().is_err());
-        let mut s = Settings::default();
-        s.theme = "blue".into();
+        let s = Settings { theme: "blue".into(), ..Settings::default() };
         assert!(s.validate().is_err());
     }
 

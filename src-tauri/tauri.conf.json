@@ -20,7 +20,9 @@
         "minHeight": 420
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
   },
   "bundle": {
     "active": true,

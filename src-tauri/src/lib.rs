@@ -73,16 +73,8 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Ok(dir) = app.path().resource_dir() {
         candidates.push(dir.join("vendor").join("linux_util.sh"));
     }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("vendor")
-            .join("linux_util.sh"),
-    );
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .ok_or_else(|| "Bundled linux_util.sh not found".to_string())
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("vendor").join("linux_util.sh"));
+    candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| "Bundled linux_util.sh not found".to_string())
 }
 
 /// `bash <script>` with the host's environment (see `use_host_env`) and the
@@ -145,11 +137,7 @@ fn with_descriptions(json: &str, script: &std::path::Path) -> String {
     let descriptions = read_descriptions(script);
     if let Some(items) = doc.get_mut("utilities").and_then(|u| u.as_array_mut()) {
         for item in items {
-            let found = item
-                .get("name")
-                .and_then(|n| n.as_str())
-                .and_then(|n| descriptions.get(n))
-                .cloned();
+            let found = item.get("name").and_then(|n| n.as_str()).and_then(|n| descriptions.get(n)).cloned();
             if let (Some(text), Some(obj)) = (found, item.as_object_mut()) {
                 obj.insert("description".into(), text.into());
             }
@@ -205,18 +193,11 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
     let script = script_path(&app)?;
     let mut cmd = script_command(&app, &script);
     tauri::async_runtime::spawn_blocking(move || {
-        let output = cmd
-            .args(["--list", "--json", "--no-color"])
-            .output()
-            .map_err(|e| format!("Could not start linux_util.sh: {e}"))?;
+        let output = cmd.args(["--list", "--json", "--no-color"]).output().map_err(|e| format!("Could not start linux_util.sh: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "linux_util.sh --list failed ({}): {}",
-                output.status,
-                stderr.trim()
-            ));
+            return Err(format!("linux_util.sh --list failed ({}): {}", output.status, stderr.trim()));
         }
         match stdout.find('{') {
             Some(start) => Ok(with_menu_order(&with_descriptions(&stdout[start..], &script), &script)),
@@ -230,13 +211,8 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
 /// The distro's display name from `/etc/os-release` (falls back to `/usr/lib`).
 #[tauri::command]
 fn detected_distro() -> Option<String> {
-    let text = std::fs::read_to_string("/etc/os-release")
-        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
-        .ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix("PRETTY_NAME="))
-        .map(|v| v.trim().trim_matches('"').to_string())
-        .filter(|v| !v.is_empty())
+    let text = std::fs::read_to_string("/etc/os-release").or_else(|_| std::fs::read_to_string("/usr/lib/os-release")).ok()?;
+    text.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
 }
 
 /// Entry point for `SUDO_ASKPASS` (`--askpass`): no window, just print the password.
@@ -248,9 +224,7 @@ pub fn askpass() -> ! {
 #[cfg(target_os = "linux")]
 fn is_wsl() -> bool {
     std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|v| v.to_lowercase().contains("microsoft"))
-            .unwrap_or(false)
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|v| v.to_lowercase().contains("microsoft")).unwrap_or(false)
 }
 
 pub fn run() {
