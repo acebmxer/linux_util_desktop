@@ -5,8 +5,9 @@ run-name: ${{ inputs.description || github.event.head_commit.message || 'Release
 # When the app version changes on main, or when started by hand (Actions ->
 # Release -> Run workflow, on main or dev): builds the
 # AppImage, .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and
-# Arch containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS to
-# a release. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than
+# Arch containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS,
+# signed with minisign (SHA256SUMS.minisig, key in the MINISIGN_SECRET_KEY repo
+# secret; the app checks it with src-tauri/minisign.pub), to a release. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than
 # that.
 #
 # main -> DRAFT stable release, tag v<version>. Publishing the draft creates the
@@ -169,6 +170,24 @@ jobs:
           name: release
           path: release
 
+      # Signed here, after the smoke tests, so the key is only ever in this job.
+      # The app refuses an update whose SHA256SUMS has no valid signature.
+      - name: Sign SHA256SUMS
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [[ -z "$MINISIGN_SECRET_KEY" ]]; then
+            echo "::error::The MINISIGN_SECRET_KEY repo secret is not set; releases must be signed"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          minisign -S -s "$key" -m release/SHA256SUMS
+          minisign -V -p src-tauri/minisign.pub -m release/SHA256SUMS
+
       - name: Create or refresh the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -178,14 +197,14 @@ jobs:
           tag="v$version"
           title="Linux_Util Desktop $tag (stable)"
           flags=(--draft)
-          notes="Stable release. Checksums for every file are in SHA256SUMS."
+          notes="Stable release. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
             tag="v$version-beta.$BETA_NUMBER"
             title="$tag"
             flags=(--prerelease)  # published, not a draft: the app cannot see drafts
             # What is new in this beta is what CHANGELOG.md lists under [Unreleased].
             unreleased=$(awk '/^## \[Unreleased\]/{f=1; next} /^## \[/{f=0} f' CHANGELOG.md)
-            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS." "$unreleased")
+            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig." "$unreleased")
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # A beta is published on creation, so only a stable release is protected once public.

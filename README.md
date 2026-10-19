@@ -81,8 +81,9 @@ version. On launch the app looks at this project's latest stable GitHub release
 (or, with **Include beta versions** on in Settings, the newest release including
 betas) and, if it is newer, shows a bar with the release notes and an **Install update**
 button (turn the launch check off in Settings; **Check for updates** checks on
-demand). Nothing is downloaded until you click. The matching file is checked
-against the release's `SHA256SUMS` first, then a `.deb` or `.rpm` is installed
+demand). Nothing is downloaded until you click. The release's `SHA256SUMS` must
+carry this project's signature (`SHA256SUMS.minisig`) and the downloaded file
+must match it; then a `.deb` or `.rpm` is installed
 with apt-get, dnf or zypper through the same password dialog as the other
 actions, or an AppImage file is replaced in place. Restart the app afterwards.
 Turning beta versions off goes back to stable releases only; a beta already
@@ -154,7 +155,8 @@ when linux_util has a newer tag.
 
 ## Packaging
 
-Each release has three files, plus `SHA256SUMS`:
+Each release has three files, plus `SHA256SUMS` and its minisign signature
+`SHA256SUMS.minisig`:
 
 | File | For |
 |---|---|

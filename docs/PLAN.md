@@ -91,7 +91,7 @@ Goal: install, uninstall and update from the app.
 - [x] Cancel a running action, and block a second concurrent run (concurrent block: Rust check plus disabled buttons; only the disabled buttons were seen)
 - [x] Error display and a copy-log button (copy button: not clicked in the test)
 
-Built: `src-tauri/src/actions.rs` (run queue, `sudo` shim, askpass over a private
+Built: `src-tauri/src/actions/` (run queue, `sudo` shim, askpass over a private
 Unix socket, password checked once with `sudo -S -k -v` and kept in memory for
 one run) and the action bar, log pane and password dialog in the UI. Actions run
 from a per-user copy of the vendored script in the app data directory, because
@@ -136,9 +136,9 @@ All of Stage 6 tested in an Ubuntu 22.04 container under a virtual display, not 
 Goal: see which version is running, and get a newer release from inside the app.
 - [x] Show the app version and the bundled linux_util version (`vendor/linux_util.VERSION`) in the window (bottom line)
 - [x] Check the GitHub releases of this repo for a newer version on launch, with a Settings switch to turn the check off; show what changed (a bar, and a dialog with the release notes; a "Check for updates" link checks on demand)
-- [x] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`
+- [x] Install the update from the app: the `.deb` or `.rpm` through the existing password dialog (apt, dnf or zypper), or replace the AppImage file; checked against the release's `SHA256SUMS`, whose minisign signature (`SHA256SUMS.minisig`) must match the key built into the app
 
-Tested against a local stand-in for the GitHub release (`LU_RELEASES_URL`, which also lifts the download address check; read by debug builds only) in containers under a virtual display, with real 0.1.0 and 0.2.0 builds: `.deb` on Ubuntu 22.04, `.rpm` on Fedora and openSUSE, AppImage on Ubuntu 22.04. Each took 0.1.0 to 0.2.0; a wrong checksum installed nothing; a read-only AppImage folder failed with a message. Not tested: Arch, or against the real GitHub API.
+Tested against a local stand-in for the GitHub release (`LU_RELEASES_URL`, which also lifts the download address check, with `LU_RELEASES_KEY` naming the public key the local server's `SHA256SUMS.minisig` is checked with; both read by debug builds only) in containers under a virtual display, with real 0.1.0 and 0.2.0 builds: `.deb` on Ubuntu 22.04, `.rpm` on Fedora and openSUSE, AppImage on Ubuntu 22.04. Each took 0.1.0 to 0.2.0; a wrong checksum installed nothing; a read-only AppImage folder failed with a message. Not tested: Arch, or against the real GitHub API.
 
 A newer linux_util arrives in a new app release (open question 4): the app updates as a whole, unlike linux_util's own `git pull` self-update.
 

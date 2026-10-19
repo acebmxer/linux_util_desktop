@@ -2,6 +2,10 @@ import "./style.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { TermLog } from "./terminal";
+import { $ } from "./dom";
+import "./logs";
+import "./profiles";
+import { applyShortcuts, fillShortcuts, offerShortcuts } from "./shortcuts";
 
 interface Utility {
   name: string;
@@ -16,14 +20,12 @@ const SCHEMA = "linux_util/list/v1";
 const ALL = "All";
 const TASKS = "System Tasks";
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-
-let utilities: Utility[] = [];
+export let utilities: Utility[] = [];
 let loaded = false;
 let selected = ALL;
 let selectedSub: string | null = null;
 let query = "";
-const picked = new Set<string>();
+export const picked = new Set<string>();
 let running = false;
 // True while the run in the panel is an update of the app itself.
 let updating = false;
@@ -270,7 +272,7 @@ function listBoxes(): HTMLInputElement[] {
   return Array.from($("list").querySelectorAll<HTMLInputElement>("input[type=checkbox]"));
 }
 
-function render() {
+export function render() {
   renderCategories();
   renderList();
   renderActionBar();
@@ -552,214 +554,6 @@ $("rebootnow").addEventListener("click", async () => {
   }
 });
 
-// ---- profiles ----
-
-interface Profile {
-  label: string;
-  description: string;
-  utilities: string[];
-}
-
-let builtinProfiles: Profile[] | null = null;
-let imported: { file: string; profiles: Profile[] } | null = null;
-
-function profileError(e: unknown) {
-  $("profileerr").textContent = e ? String(e) : "";
-}
-
-// Like linux_util's own profiles, choosing one replaces the selection. Names
-// this distro does not offer are left out and listed.
-function applyProfile(p: Profile) {
-  const known = new Set(utilities.map((u) => u.name));
-  const available = p.utilities.filter((n) => known.has(n));
-  const missing = p.utilities.filter((n) => !known.has(n));
-  if (!available.length) {
-    profileError(`None of the utilities in "${p.label}" are available on this distro.`);
-    return;
-  }
-  picked.clear();
-  for (const n of available) picked.add(n);
-  $("selnote").textContent =
-    `from "${p.label}"` + (missing.length ? `; not available on this distro: ${missing.join(", ")}` : "");
-  $<HTMLDialogElement>("profiles").close();
-  render();
-}
-
-function profileSection(title: string, profiles: Profile[]): HTMLElement[] {
-  const known = new Set(utilities.map((u) => u.name));
-  const heading = document.createElement("h3");
-  heading.textContent = title;
-  return [
-    heading,
-    ...profiles.map((p) => {
-      const item = document.createElement("div");
-      item.className = "profile";
-      const text = document.createElement("div");
-      const label = document.createElement("strong");
-      label.textContent = p.label;
-      text.append(label);
-      const count = p.utilities.filter((n) => known.has(n)).length;
-      const notes = [p.description];
-      if (count < p.utilities.length) notes.push(`${p.utilities.length - count} not available on this distro`);
-      for (const note of notes.filter(Boolean)) {
-        const line = document.createElement("p");
-        line.className = "muted";
-        line.textContent = note;
-        text.append(line);
-      }
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = `Select (${count})`;
-      button.disabled = count === 0;
-      button.addEventListener("click", () => applyProfile(p));
-      item.append(text, button);
-      return item;
-    }),
-  ];
-}
-
-function renderProfiles() {
-  const list = $("profilelist");
-  const parts: HTMLElement[] = [];
-  if (builtinProfiles === null) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Loading profiles…";
-    parts.push(p);
-  } else if (builtinProfiles.length) {
-    parts.push(...profileSection("Built into linux_util", builtinProfiles));
-  }
-  if (imported) parts.push(...profileSection(`From ${imported.file}`, imported.profiles));
-  list.replaceChildren(...parts);
-  $<HTMLButtonElement>("profileexport").disabled = picked.size === 0;
-}
-
-async function openProfiles() {
-  profileError(null);
-  renderProfiles();
-  $<HTMLDialogElement>("profiles").showModal();
-  if (builtinProfiles !== null) return;
-  try {
-    builtinProfiles = await invoke<Profile[]>("list_profiles");
-  } catch (e) {
-    builtinProfiles = [];
-    profileError(e);
-  }
-  renderProfiles();
-}
-
-$("openprofiles").addEventListener("click", openProfiles);
-$("profileclose").addEventListener("click", () => $<HTMLDialogElement>("profiles").close());
-$("profileimport").addEventListener("click", async () => {
-  profileError(null);
-  try {
-    const result = await invoke<{ file: string; profiles: Profile[] } | null>("import_profile");
-    if (!result) return;
-    imported = result;
-    if (result.profiles.length === 1) applyProfile(result.profiles[0]);
-    else renderProfiles();
-  } catch (e) {
-    profileError(e);
-  }
-});
-$<HTMLFormElement>("exportform").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  profileError(null);
-  const label = $<HTMLInputElement>("profilename").value.trim();
-  const names = utilities.filter((u) => picked.has(u.name)).map((u) => u.name);
-  if (!label || !names.length) return;
-  try {
-    const file = await invoke<string | null>("export_profile", { label, utilities: names });
-    if (!file) return;
-    $("selnote").textContent = `saved to ${file}`;
-    $<HTMLDialogElement>("profiles").close();
-  } catch (e) {
-    profileError(e);
-  }
-});
-
-// ---- logs ----
-
-interface LogFile {
-  name: string;
-  size: number;
-  modified: number;
-}
-
-let logShown = "";
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function showLog(name: string) {
-  $("logerr").textContent = "";
-  for (const b of Array.from($("loglist").querySelectorAll("button"))) {
-    b.setAttribute("aria-current", String(b.dataset.name === name));
-  }
-  try {
-    const log = await invoke<{ path: string; text: string; truncated: boolean }>("read_log", { name });
-    logShown = log.text;
-    $("logview").textContent = log.text;
-    $("logview").scrollTop = $("logview").scrollHeight;
-    $("logpath").textContent = log.truncated ? `${log.path} (showing the end of a long log)` : log.path;
-  } catch (e) {
-    logShown = "";
-    $("logview").textContent = "";
-    $("logerr").textContent = String(e);
-  }
-}
-
-async function refreshLogs() {
-  $("logerr").textContent = "";
-  let files: LogFile[] = [];
-  try {
-    files = await invoke<LogFile[]>("list_logs");
-  } catch (e) {
-    $("logerr").textContent = String(e);
-  }
-  const items = files.map((f) => {
-    const li = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.name = f.name;
-    const name = document.createElement("span");
-    name.textContent = f.name;
-    const meta = document.createElement("span");
-    meta.className = "muted";
-    meta.textContent = `${new Date(f.modified * 1000).toLocaleString()} · ${formatSize(f.size)}`;
-    button.append(name, meta);
-    button.addEventListener("click", () => showLog(f.name));
-    li.append(button);
-    return li;
-  });
-  $("loglist").replaceChildren(...items);
-  logShown = "";
-  $("logview").textContent = "";
-  $("logpath").textContent = "";
-  if (files.length) await showLog(files[0].name);
-  else $("logview").textContent = "No logs yet. linux_util writes them when an install, uninstall or update runs.";
-}
-
-$("openlogs").addEventListener("click", () => {
-  $<HTMLDialogElement>("logs").showModal();
-  refreshLogs();
-});
-$("logrefresh").addEventListener("click", refreshLogs);
-$("logsclose").addEventListener("click", () => $<HTMLDialogElement>("logs").close());
-$("logcopy").addEventListener("click", async () => {
-  const button = $("logcopy");
-  try {
-    await navigator.clipboard.writeText(logShown);
-    button.textContent = "Copied";
-  } catch {
-    button.textContent = "Copy failed";
-  }
-  setTimeout(() => (button.textContent = "Copy"), 1500);
-});
-
 // ---- settings ----
 
 type Theme = "system" | "light" | "dark";
@@ -873,160 +667,6 @@ $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
     $("settingserr").textContent = String(e);
   }
 });
-
-// ---- shortcuts ----
-
-interface ShortcutStatus {
-  can_desktop: boolean;
-  can_menu: boolean;
-  can_taskbar: boolean;
-  taskbar_needs_menu: boolean;
-  has_desktop: boolean;
-  has_menu: boolean;
-  has_taskbar: boolean;
-  asked: boolean;
-}
-
-interface ShortcutChoice {
-  desktop: boolean;
-  menu: boolean;
-  taskbar: boolean;
-}
-
-// The desktop icon, the AppImage's menu entry and the taskbar icon are offered
-// once, on the first launch that finds one missing. Settings turns them on or off.
-async function offerShortcuts() {
-  let s: ShortcutStatus;
-  try {
-    s = await invoke<ShortcutStatus>("shortcut_status");
-  } catch {
-    return;
-  }
-  const offer: ShortcutChoice = {
-    desktop: s.can_desktop && !s.has_desktop,
-    menu: s.can_menu && !s.has_menu,
-    taskbar: s.can_taskbar && !s.has_taskbar,
-  };
-  // With another dialog open, the question waits for the next launch.
-  if (s.asked || !Object.values(offer).some(Boolean) || document.querySelector("dialog[open]")) return;
-  promptNeedsMenu = s.taskbar_needs_menu && !s.has_menu;
-  for (const [key, on] of Object.entries(offer)) {
-    $(`sc${key}row`).hidden = !on;
-    $<HTMLInputElement>(`sc${key}`).checked = on;
-  }
-  promptChanged();
-  $("scerr").textContent = "";
-  $<HTMLDialogElement>("shortcuts").showModal();
-  $("scadd").focus();
-}
-
-// Whether the AppImage's taskbar icon in the prompt waits on its menu entry.
-let promptNeedsMenu = false;
-
-function promptChoice(): ShortcutChoice {
-  const on = (key: string) => !$(`sc${key}row`).hidden && $<HTMLInputElement>(`sc${key}`).checked;
-  return { desktop: on("desktop"), menu: on("menu"), taskbar: on("taskbar") && (!promptNeedsMenu || on("menu")) };
-}
-
-function promptChanged() {
-  const taskbar = $<HTMLInputElement>("sctaskbar");
-  const wasDisabled = taskbar.disabled;
-  taskbar.disabled = promptNeedsMenu && !$<HTMLInputElement>("scmenu").checked;
-  if (taskbar.disabled) taskbar.checked = false;
-  else if (wasDisabled) taskbar.checked = true;
-  $<HTMLButtonElement>("scadd").disabled = !Object.values(promptChoice()).some(Boolean);
-}
-
-function skipShortcuts() {
-  invoke("shortcuts_asked").catch(() => {});
-  $<HTMLDialogElement>("shortcuts").close();
-}
-
-for (const box of ["scdesktop", "scmenu", "sctaskbar"]) $(box).addEventListener("change", promptChanged);
-$("scskip").addEventListener("click", skipShortcuts);
-$<HTMLDialogElement>("shortcuts").addEventListener("cancel", (ev) => {
-  ev.preventDefault();
-  skipShortcuts();
-});
-$("scadd").addEventListener("click", async () => {
-  $("scerr").textContent = "";
-  try {
-    await invoke("add_shortcuts", { ...promptChoice() });
-    await invoke("shortcuts_asked");
-    $<HTMLDialogElement>("shortcuts").close();
-  } catch (e) {
-    $("scerr").textContent = String(e);
-  }
-});
-
-// The Shortcuts section of Settings: a switch for each shortcut this install
-// can have, showing whether it is there now. Hidden for a source checkout.
-let shortcutState: ShortcutStatus | null = null;
-
-async function fillShortcuts() {
-  shortcutState = null;
-  $("shortcutfields").hidden = true;
-  let s: ShortcutStatus;
-  try {
-    s = await invoke<ShortcutStatus>("shortcut_status");
-  } catch {
-    return;
-  }
-  shortcutState = s;
-  const rows: [string, boolean, boolean][] = [
-    ["desktop", s.can_desktop, s.has_desktop],
-    ["menu", s.can_menu, s.has_menu],
-    ["taskbar", s.can_taskbar, s.has_taskbar],
-  ];
-  for (const [key, can, has] of rows) {
-    $(`${key}row`).hidden = !can;
-    $<HTMLInputElement>(`${key}on`).checked = has;
-  }
-  $("shortcutfields").hidden = !rows.some(([, can]) => can);
-  settingsMenuChanged();
-}
-
-// The AppImage's taskbar icon pins its menu entry, so it goes with it.
-function settingsMenuChanged() {
-  if (!shortcutState?.taskbar_needs_menu) return;
-  const taskbar = $<HTMLInputElement>("taskbaron");
-  const menu = $<HTMLInputElement>("menuon").checked;
-  taskbar.disabled = !menu;
-  if (!menu) taskbar.checked = false;
-}
-
-$("menuon").addEventListener("change", settingsMenuChanged);
-
-// Adds or removes what the switches changed. Called on Save.
-async function applyShortcuts() {
-  const s = shortcutState;
-  if (!s) return;
-  const want = (key: string, can: boolean) => can && $<HTMLInputElement>(`${key}on`).checked;
-  const next: ShortcutChoice = {
-    desktop: want("desktop", s.can_desktop),
-    menu: want("menu", s.can_menu),
-    taskbar: want("taskbar", s.can_taskbar),
-  };
-  const off: ShortcutChoice = {
-    desktop: s.can_desktop && s.has_desktop && !next.desktop,
-    menu: s.can_menu && s.has_menu && !next.menu,
-    taskbar: s.can_taskbar && s.has_taskbar && !next.taskbar,
-  };
-  const on: ShortcutChoice = {
-    desktop: next.desktop && !s.has_desktop,
-    menu: next.menu && !s.has_menu,
-    taskbar: next.taskbar && !s.has_taskbar,
-  };
-  try {
-    if (Object.values(off).some(Boolean)) await invoke("remove_shortcuts", { ...off });
-    if (Object.values(on).some(Boolean)) await invoke("add_shortcuts", { ...on });
-    if (!s.asked) await invoke("shortcuts_asked");
-  } catch (e) {
-    // Show what is there now, so Save again retries only what failed.
-    await fillShortcuts();
-    throw e;
-  }
-}
 
 // ---- version and updates ----
 

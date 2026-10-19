@@ -87,6 +87,13 @@ release is cut.
 
 ### Security
 
+- **Updates are installed only from releases signed with this project's key**
+  (#9). The app checked a download against the `SHA256SUMS` of the same
+  release, which catches a damaged file but not a replaced release. Releases
+  now also carry `SHA256SUMS.minisig`, a minisign signature made by the Release
+  workflow, and the app refuses an update whose `SHA256SUMS` lacks a valid
+  signature from the key built into it. Earlier app versions ignore the
+  signature, so they still update as before.
 - **The administrator password goes only to the app's own runs** (#8). While a
   run was going, any program of the same user could connect to the app's
   password socket and be handed the password. The app now asks the kernel who
