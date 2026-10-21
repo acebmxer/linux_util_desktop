@@ -1,7 +1,8 @@
 // Checks the vendored linux_util.sh against docs/CONTRACT.md: the flags the
 // app passes still exist, and `--list --json` and `--export-profile` still have
 // the shape the app reads, and the config keys the Settings window writes are
-// still read from the file named by LINUX_UTIL_CONFIG_FILE.
+// still read from the file named by LINUX_UTIL_CONFIG_FILE, and the
+// LINUX_UTIL_NO_SELF_UPDATE switch runs set is still honoured.
 // Runs the script as the current (non-root) user from a temporary copy, since
 // linux_util.sh writes logs/ next to itself. No system changes are made.
 import { spawnSync } from "node:child_process";
@@ -43,6 +44,12 @@ const configSource = readFileSync(join(vendor, "lib", "config.sh"), "utf8");
 if (!configSource.includes("LINUX_UTIL_CONFIG_FILE")) fail("lib/config.sh no longer reads LINUX_UTIL_CONFIG_FILE");
 for (const key of CONFIG_KEYS) {
   if (!new RegExp(`^\\s*${key}\\)`, "m").test(configSource)) fail(`config key ${key} is no longer read`);
+}
+
+// Runs set LINUX_UTIL_NO_SELF_UPDATE=1 to skip the git update check.
+const selfUpdate = readFileSync(join(vendor, "lib", "installers", "self_update.sh"), "utf8");
+if (!/LINUX_UTIL_NO_SELF_UPDATE:-0\}" == "1"/.test(selfUpdate)) {
+  fail("lib/installers/self_update.sh no longer skips the update check for LINUX_UTIL_NO_SELF_UPDATE=1");
 }
 
 const work = mkdtempSync(join(tmpdir(), "lud-contract-"));

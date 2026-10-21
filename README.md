@@ -49,22 +49,41 @@ linux_util's own format, so a file saved by the app can be applied on another
 machine with `linux_util.sh --import-profile <file>`.
 
 Settings has a theme (follow the system, light or dark) and the linux_util
-options that affect the app's runs: answering yes to installer questions
-(without a terminal they are answered no), verbose and debug output, and how
-long logs are kept. They are saved in the app's config folder
+options that affect the app's runs: answering yes to the questions installers
+ask before a risky step instead of asking them, verbose and debug output, and
+how long logs are kept. They are saved in the app's config folder
 (`~/.config/io.github.acebmxer.linux-util-desktop/`).
 
-While a run is going, a box under its output sends a typed answer to the run,
-for questions the package manager itself asks, such as dnf's `Is this ok
-[y/N]` or apt's `Do you want to continue? [Y/n]` during **System Updates**.
+On its first launch, a copy installed from a release file offers a desktop
+icon, a taskbar icon on KDE (Task Manager) or GNOME (dash), and for the
+AppImage an app menu entry too (the `.deb` and `.rpm` add the menu entry
+themselves). The desktop icon and menu entry are small launcher files pointing
+at the one installed copy; the AppImage's point at wherever the file is kept,
+so moving or renaming it breaks them. The taskbar icon pins the menu entry, so
+the AppImage's needs that on. The question is asked once; Settings → Shortcuts
+turns each one on or off later.
+
+The administrator password is asked once, when the app starts, as linux_util
+asks before its menu. It is kept in memory only, never on disk, and asked again
+only once sudo's own timeout (5 minutes unless your system sets another) has
+passed with nothing running.
+
+Each run gets a terminal of its own, so linux_util behaves exactly as it does
+in a terminal window, and the output panel shows what that terminal shows,
+colours included. When a question is waiting, a box appears under the output:
+type a line or a menu number and press Enter, press one key for a question that
+takes a single key, or type a hidden answer such as a password, which is never
+shown or logged. Typing into the output also opens the box, for a question the
+app did not recognise.
 
 The window's bottom line shows the app version and the bundled linux_util
 version. On launch the app looks at this project's latest stable GitHub release
 (or, with **Include beta versions** on in Settings, the newest release including
 betas) and, if it is newer, shows a bar with the release notes and an **Install update**
 button (turn the launch check off in Settings; **Check for updates** checks on
-demand). Nothing is downloaded until you click. The matching file is checked
-against the release's `SHA256SUMS` first, then a `.deb` or `.rpm` is installed
+demand). Nothing is downloaded until you click. The release's `SHA256SUMS` must
+carry this project's signature (`SHA256SUMS.minisig`) and the downloaded file
+must match it; then a `.deb` or `.rpm` is installed
 with apt-get, dnf or zypper through the same password dialog as the other
 actions, or an AppImage file is replaced in place. Restart the app afterwards.
 Turning beta versions off goes back to stable releases only; a beta already
@@ -88,8 +107,9 @@ change is needed.
 - **Look the same everywhere.** One interface on GNOME, KDE and the rest,
   mirroring the layout of the linux_util terminal UI (categories, search,
   multi-select).
-- **No terminal, no password handling in the app.** Admin rights go through
-  the system's own password prompt.
+- **No terminal window needed.** Each run has its own terminal behind the
+  scenes, and its questions and the administrator password are answered in
+  the app.
 - **Pinned and reproducible.** Each release bundles a known version of
   `linux_util.sh`.
 
@@ -135,7 +155,8 @@ when linux_util has a newer tag.
 
 ## Packaging
 
-Each release has three files, plus `SHA256SUMS`:
+Each release has three files, plus `SHA256SUMS` and its minisign signature
+`SHA256SUMS.minisig`:
 
 | File | For |
 |---|---|
@@ -154,7 +175,7 @@ workflow builds all three on Ubuntu 22.04, installs each in clean containers
 and attaches them to a **draft** GitHub release for that version, marked
 **stable**. Publishing the draft creates the tag, so the files are already
 there. Running the workflow by hand on `dev` (Actions → Release → Run workflow)
-publishes a **beta** pre-release at once, tagged `v<version>-beta.<run number>`
+publishes a **beta** pre-release at once, tagged `v<version>-beta.<n>`, counting up from 1 for each version
 and titled with the tag, its notes listing what `CHANGELOG.md` has under
 `[Unreleased]`, for testing the real packages before the PR to `main`. Betas are never
 "latest"; the app offers them only when **Include beta versions** is on.

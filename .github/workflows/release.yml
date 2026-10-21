@@ -5,16 +5,17 @@ run-name: ${{ inputs.description || github.event.head_commit.message || 'Release
 # When the app version changes on main, or when started by hand (Actions ->
 # Release -> Run workflow, on main or dev): builds the
 # AppImage, .deb and .rpm, installs each in clean Ubuntu, Fedora, openSUSE and
-# Arch containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS to
-# a release. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than
+# Arch containers (scripts/smoke_test.sh), then attaches them with SHA256SUMS,
+# signed with minisign (SHA256SUMS.minisig, key in the MINISIGN_SECRET_KEY repo
+# secret; the app checks it with src-tauri/minisign.pub), to a release. Builds on Ubuntu 22.04 so the AppImage needs no newer glibc than
 # that.
 #
 # main -> DRAFT stable release, tag v<version>. Publishing the draft creates the
 #         tag, so the files are already there when it goes public.
-# dev  -> only by hand. Beta pre-release, tag v<version>-beta.<run number>, published at once
+# dev  -> only by hand. Beta pre-release, tag v<version>-beta.<n>, n counting up per version, published at once
 #         (the app's update check cannot see drafts) with the files attached.
 #         Pre-releases are never "latest", so only users who turned on beta
-#         updates are offered them. The run number is also built into the app
+#         updates are offered them. The number is also built into the app
 #         (LU_BETA_BUILD) so a beta knows which beta it is.
 on:
   push:
@@ -62,17 +63,31 @@ jobs:
     needs: version
     if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-22.04
+    outputs:
+      beta: ${{ steps.beta.outputs.n }}
     steps:
       - uses: actions/checkout@v4
 
+      # Stable and beta alike: a beta of a version that is already released would
+      # be labelled with the old number (v0.2.1-beta.12 after v0.2.1).
       - name: Stop if this version is already released
-        if: github.ref_name == 'main'
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
-            echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json first"
+            echo "::error::v$version is already tagged; bump the version in src-tauri/tauri.conf.json (and package.json, src-tauri/Cargo.toml) on this branch first"
             exit 1
           fi
+
+      # Betas count up per version: v0.2.2-beta.1, .2, .3. The next number is one
+      # above the highest beta tag of this version already on the remote.
+      - name: Number this beta
+        id: beta
+        if: github.ref_name != 'main'
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          last=$(git ls-remote --tags origin "refs/tags/v$version-beta.*" \
+            | sed -n 's|.*-beta\.\([0-9]*\)$|\1|p' | sort -n | tail -1)
+          echo "n=$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -96,7 +111,7 @@ jobs:
       - run: npm run contract
       - run: npx tauri build
         env:
-          LU_BETA_BUILD: ${{ github.ref_name != 'main' && github.run_number || '' }}
+          LU_BETA_BUILD: ${{ steps.beta.outputs.n }}
 
       - name: Collect release files
         run: |
@@ -141,7 +156,7 @@ jobs:
       - run: scripts/smoke_test.sh "${{ matrix.distro }}" release
 
   release:
-    needs: smoke
+    needs: [build, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -155,22 +170,41 @@ jobs:
           name: release
           path: release
 
+      # Signed here, after the smoke tests, so the key is only ever in this job.
+      # The app refuses an update whose SHA256SUMS has no valid signature.
+      - name: Sign SHA256SUMS
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [[ -z "$MINISIGN_SECRET_KEY" ]]; then
+            echo "::error::The MINISIGN_SECRET_KEY repo secret is not set; releases must be signed"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          minisign -S -s "$key" -m release/SHA256SUMS
+          minisign -V -p src-tauri/minisign.pub -m release/SHA256SUMS
+
       - name: Create or refresh the release
         env:
           GH_TOKEN: ${{ github.token }}
+          BETA_NUMBER: ${{ needs.build.outputs.beta }}
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="v$version"
           title="Linux_Util Desktop $tag (stable)"
           flags=(--draft)
-          notes="Stable release. Checksums for every file are in SHA256SUMS."
+          notes="Stable release. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
-            tag="v$version-beta.$GITHUB_RUN_NUMBER"
+            tag="v$version-beta.$BETA_NUMBER"
             title="$tag"
             flags=(--prerelease)  # published, not a draft: the app cannot see drafts
             # What is new in this beta is what CHANGELOG.md lists under [Unreleased].
             unreleased=$(awk '/^## \[Unreleased\]/{f=1; next} /^## \[/{f=0} f' CHANGELOG.md)
-            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS." "$unreleased")
+            notes=$(printf '%s\n\n%s' "Beta build from the $GITHUB_REF_NAME branch, for testing before it reaches main. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig." "$unreleased")
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # A beta is published on creation, so only a stable release is protected once public.

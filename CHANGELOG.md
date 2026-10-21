@@ -11,6 +11,116 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Added
+
+- **Desktop icon, taskbar icon and app menu entry.** On its first launch the
+  app offers a desktop icon, a taskbar icon on KDE or GNOME, and when run as an
+  AppImage an app menu entry too, which the AppImage never had. The desktop
+  icon and menu entry are launcher files pointing at the one installed copy.
+  The question is asked once, also after upgrading, and skipped when they are
+  already there;  Settings → Shortcuts turns each one on or off.
+- **The main window shows when installer questions are answered for you**
+  (#13). While Settings → "Answer yes to installer questions" is on, "Answering
+  yes to questions" appears next to Dry run; clicking it opens Settings.
+
+### Changed
+
+- **Bundles linux_util v1.10.0** (was v1.9.0), which lists 245 utilities.
+- **The administrator password is asked once, when the app starts,** as
+  linux_util asks before its menu, instead of at the start of every run, even
+  runs that needed no administrator rights. It is kept in memory only and asked
+  again only once sudo's own timeout has passed with nothing running.
+
+  Systems where commands run without a password but `sudo -v` still asks for
+  one, such as Fedora on WSL (its first user has both the `wheel` rule and a
+  NOPASSWD rule), are now asked at start-up too. The app used to skip the
+  question there and ask in the middle of the first run, because linux_util
+  starts every run with `sudo -v` (#14).
+- **The run panel shows the run as a terminal window does.** Output arrives as
+  one stream in the order it was written, with linux_util's colours, spinners
+  and package-manager progress bars, and "Copy log" copies what is on screen.
+  The answer box appears only while a question is waiting: a line or menu
+  number with Enter, a single key on its own, or a hidden answer such as a
+  password.
+- **CI now runs the tests and linters** (#11): `cargo test`, `cargo clippy`
+  with warnings as errors, `cargo fmt --check` and `shellcheck`, besides the
+  build. The Rust code was reformatted once to the new `src-tauri/rustfmt.toml`.
+
+### Fixed
+
+- **System Updates with nothing to update ended with "Failed: System
+  Updates"** in the output, although the run was counted as succeeded. That
+  line from linux_util is no longer shown after "No package changes were made."
+- **Single-key questions got the wrong answer.** Snapper, Timeshift, Bootloader
+  Manager, Xen Guest Utilities and others ask for one key. The app sent the key
+  with Enter, and the leftover Enter answered the next question with its
+  default. A single-key question now gets just the key.
+- **Hidden answers were shown and logged.** Mount SMB Share and Update Mount ask
+  for a password with hidden input; the answer box showed it and copied it into
+  the log. It is now a password field and the answer is never shown.
+- **"Copy log" put each answered question below the lines that came after it.**
+- **Every run started with "Script directory is not a git repository; cannot
+  self-update."** The bundled copy is updated with the app, so runs now tell
+  linux_util to skip its own update check.
+- **Installers that ask a question on the terminal were cancelled.** NVIDIA
+  Drivers on Fedora asked "enable RPM Fusion now?" by reading `/dev/tty`, which
+  the app's scripts did not have, so the install failed with "No such device or
+  address". Each script now runs on its own pseudo-terminal, so those prompts
+  appear in the run panel and take your typed answer, as in a terminal.
+
+  An item that left a process running in the background, such as the NVIDIA
+  install on Fedora, then stayed "running" with no question asked, because the
+  app waited for that process to let go of the terminal. The item now ends two
+  seconds after the script itself exits.
+
+  Questions written straight to the terminal by programs other than the script,
+  such as `chsh` asking for your password in Zsh + Oh My Zsh, never appeared;
+  they now show in the run panel like any other question.
+- **Reboot now failed on systems with passwordless sudo.** The reboot used
+  `sudo` only when a password had been collected during the run, and with
+  passwordless sudo none ever is. It then fell back to `systemctl reboot` as the
+  user, which needs a desktop authentication agent and is denied where there is
+  none, such as Fedora on WSL ("Interactive authentication has not been
+  enabled"). It now tries `sudo` first, without a password when none was given,
+  and only falls back to plain `systemctl reboot` if that fails.
+- **The app crashed on start under WSL.** WebKit segfaulted on WSLg's `dzn`
+  graphics driver, so nothing opened from the terminal or the Windows Start
+  menu. On WSL the app now renders in software, unless `LIBGL_ALWAYS_SOFTWARE`
+  or `WEBKIT_DISABLE_COMPOSITING_MODE` is already set in the environment.
+- **One internal error could break every later action** (#13). If a
+  background task failed while holding the app's run state, each later click
+  (run, cancel, answer, reboot) failed too until the app was restarted. The app
+  now carries on with that state.
+
+### Security
+
+- **Updates are installed only from releases signed with this project's key**
+  (#9). The app checked a download against the `SHA256SUMS` of the same
+  release, which catches a damaged file but not a replaced release. Releases
+  now also carry `SHA256SUMS.minisig`, a minisign signature made by the Release
+  workflow, and the app refuses an update whose `SHA256SUMS` lacks a valid
+  signature from the key built into it. Earlier app versions ignore the
+  signature, so they still update as before.
+- **The administrator password goes only to the app's own runs** (#8). While a
+  run was going, any program of the same user could connect to the app's
+  password socket and be handed the password. The app now asks the kernel who
+  connected and answers only processes it started itself; any other program
+  gets nothing, and the run's own sudo still gets the password after it.
+
+  When the password was first asked for during a run rather than at start-up,
+  the run then hung: the dialog stayed on "Checking…" after the password was
+  entered, Cancel stopped the script but the run never ended, and no other
+  action could start until the app was closed (#14).
+- **Release builds no longer read `LU_RELEASES_URL`** (#10). The variable
+  pointed the update check at another server and let it download from any
+  address; it was meant for testing only. Only debug builds read it now; a
+  release build always checks and downloads from this repo's GitHub releases.
+- **The app window has a Content Security Policy** (#13). It loads scripts,
+  styles and images only from the app itself and talks only to the app's own
+  backend, where before no policy was set.
+
 ## [0.2.1] - 2026-10-15
 
 ### Added

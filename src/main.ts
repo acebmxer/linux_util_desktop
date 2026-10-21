@@ -1,6 +1,11 @@
 import "./style.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { TermLog } from "./terminal";
+import { $ } from "./dom";
+import "./logs";
+import "./profiles";
+import { applyShortcuts, fillShortcuts, offerShortcuts } from "./shortcuts";
 
 interface Utility {
   name: string;
@@ -15,14 +20,12 @@ const SCHEMA = "linux_util/list/v1";
 const ALL = "All";
 const TASKS = "System Tasks";
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-
-let utilities: Utility[] = [];
+export let utilities: Utility[] = [];
 let loaded = false;
 let selected = ALL;
 let selectedSub: string | null = null;
 let query = "";
-const picked = new Set<string>();
+export const picked = new Set<string>();
 let running = false;
 // True while the run in the panel is an update of the app itself.
 let updating = false;
@@ -269,7 +272,7 @@ function listBoxes(): HTMLInputElement[] {
   return Array.from($("list").querySelectorAll<HTMLInputElement>("input[type=checkbox]"));
 }
 
-function render() {
+export function render() {
   renderCategories();
   renderList();
   renderActionBar();
@@ -300,45 +303,45 @@ function renderActionBar() {
 
 // ---- running actions ----
 
-const logEl = () => $<HTMLPreElement>("log");
-let logText = "";
+const term = new TermLog($("log"));
 
-// A line still waiting for its newline, per stream (e.g. a "[y/N]" prompt).
-// The next output on that stream replaces its text.
-const partialLines = new Map<boolean, HTMLDivElement>();
+// How the waiting question is answered, or null while nothing is waiting:
+// "line" sends the text and Enter, "key" sends each key as it is pressed.
+let answerMode: "line" | "key" | null = null;
 
-function appendLog(text: string, stderr = false, partial = false, error = stderr) {
-  const pre = logEl();
-  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
-  let line = partialLines.get(stderr);
-  if (!line) {
-    line = document.createElement("div");
-    if (error) line.className = "err";
-    pre.append(line);
-  }
-  line.textContent = text;
-  if (partial) partialLines.set(stderr, line);
-  else {
-    partialLines.delete(stderr);
-    logText += text + "\n";
-  }
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+function showAnswer(mode: "line" | "key" | null, hidden = false, first = "") {
+  answerMode = running ? mode : null;
+  const form = $<HTMLFormElement>("answer");
+  const input = $<HTMLInputElement>("answertext");
+  // The box takes room from the output; keep the question in view.
+  const stick = term.atBottom();
+  form.hidden = answerMode === null;
+  if (stick) term.scrollToBottom();
+  if (answerMode === null) return;
+  form.dataset.mode = answerMode;
+  input.type = hidden ? "password" : "text";
+  input.value = first;
+  input.placeholder =
+    answerMode === "key"
+      ? "Press a key to answer"
+      : hidden
+        ? "Type the answer (hidden), then press Enter"
+        : "Type your answer, then press Enter";
+  input.focus();
 }
 
-// Shows a typed answer the way a terminal echoes it: after the prompt it answers.
-function echoAnswer(text: string) {
-  const prompt = partialLines.get(false) ?? partialLines.get(true);
-  partialLines.clear();
-  if (prompt) {
-    prompt.textContent += text;
-    logText += prompt.textContent + "\n";
-  } else appendLog(text);
+async function sendInput(text: string, enter: boolean) {
+  try {
+    await invoke("send_input", { text, enter });
+  } catch (e) {
+    term.line(String(e), "err");
+  }
 }
 
 function setRunning(value: boolean) {
   running = value;
   $<HTMLButtonElement>("cancel").hidden = !value;
-  $<HTMLFormElement>("answer").hidden = !value;
+  if (!value) showAnswer(null);
   $<HTMLButtonElement>("closerun").hidden = value;
   $<HTMLButtonElement>("copylog").hidden = false;
   render();
@@ -380,10 +383,8 @@ async function launch(op: Op, names: string[], title: string) {
 
 // Shows the run panel with one queue entry per name, then starts the run.
 async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
-  logText = "";
   rebootItems = new Set();
-  partialLines.clear();
-  logEl().replaceChildren();
+  term.reset();
   $("runtitle").textContent = title;
   $("runsummary").textContent = "";
   $("queue").replaceChildren(
@@ -398,7 +399,7 @@ async function openRun(title: string, names: string[], begin: () => Promise<unkn
   try {
     await begin();
   } catch (e) {
-    appendLog(String(e), true);
+    term.line(String(e), "err");
     setRunning(false);
   }
 }
@@ -433,23 +434,37 @@ $("clearsel").addEventListener("click", () => {
   render();
 });
 $("cancel").addEventListener("click", () => invoke("cancel_run"));
-$<HTMLFormElement>("answer").addEventListener("submit", async (ev) => {
+$<HTMLFormElement>("answer").addEventListener("submit", (ev) => {
   ev.preventDefault();
+  if (answerMode !== "line") return;
   const input = $<HTMLInputElement>("answertext");
   const text = input.value;
   input.value = "";
-  try {
-    await invoke("send_input", { text });
-    echoAnswer(text);
-  } catch (e) {
-    appendLog(String(e), true);
-  }
+  sendInput(text, true);
+});
+// A single-key question takes each key as it is pressed, as in a terminal:
+// Enter on its own picks the default and Esc reaches the script.
+$("answertext").addEventListener("keydown", (ev) => {
+  if (answerMode !== "key" || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+  const key = ev.key === "Enter" ? "" : ev.key === "Escape" ? "\x1b" : ev.key.length === 1 ? ev.key : null;
+  if (key === null) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  sendInput(key, ev.key === "Enter");
+});
+// Typing into the output while a run is going answers it, as typing into a
+// terminal does, for a question the app did not recognise as one.
+$("log").addEventListener("keydown", (ev) => {
+  if (!running || answerMode !== null || ev.ctrlKey || ev.altKey || ev.metaKey || ev.key.length !== 1) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  showAnswer("line", false, ev.key);
 });
 $("closerun").addEventListener("click", () => ($("runpanel").hidden = true));
 $("copylog").addEventListener("click", async () => {
   const button = $("copylog");
   try {
-    await navigator.clipboard.writeText(logText);
+    await navigator.clipboard.writeText(term.text());
     button.textContent = "Copied";
   } catch {
     button.textContent = "Copy failed";
@@ -469,8 +484,10 @@ $<HTMLDialogElement>("askpass").addEventListener("cancel", (ev) => {
   stopAsking(null);
 });
 
-listen<{ text: string; stderr: boolean; error: boolean; partial: boolean }>("run-output", (ev) =>
-  appendLog(ev.payload.text, ev.payload.stderr, ev.payload.partial, ev.payload.error),
+listen<{ text: string; error: boolean }>("run-output", (ev) => term.line(ev.payload.text, ev.payload.error ? "err" : ""));
+listen<{ data: string }>("run-term", (ev) => term.write(ev.payload.data));
+listen<{ waiting: boolean; mode: "line" | "key"; hidden: boolean }>("run-input", (ev) =>
+  showAnswer(ev.payload.waiting ? ev.payload.mode : null, ev.payload.hidden),
 );
 listen<{ index: number; name: string; state: string; code: number | null }>("run-item", (ev) => {
   const { index, name, state, code } = ev.payload;
@@ -479,13 +496,13 @@ listen<{ index: number; name: string; state: string; code: number | null }>("run
     li.className = state;
     li.textContent = state === "failed" && code !== null ? `${name} (exit ${code})` : name;
   }
-  if (state === "running") appendLog(`--- ${name} ---`);
+  if (state === "running") term.line(`--- ${name} ---`);
   else if (state === "ok") {
     if (code !== 3 && rebootsAfter(name)) rebootItems.add(name);
-    appendLog(`--- ${name}: finished ---`);
+    term.line(`--- ${name}: finished ---`);
   }
-  else if (state === "failed") appendLog(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, true);
-  else appendLog(`--- ${name}: cancelled ---`);
+  else if (state === "failed") term.line(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, "err");
+  else term.line(`--- ${name}: cancelled ---`);
 });
 listen<{ error: string | null }>("askpass-request", (ev) => {
   $("askerr").textContent = ev.payload.error ?? "";
@@ -527,10 +544,7 @@ async function offerReboot() {
   $("rebootlater").focus();
 }
 
-$("rebootlater").addEventListener("click", () => {
-  invoke("forget_password").catch(() => {});
-  $<HTMLDialogElement>("reboot").close();
-});
+$("rebootlater").addEventListener("click", () => $<HTMLDialogElement>("reboot").close());
 $("rebootnow").addEventListener("click", async () => {
   try {
     await invoke("reboot_now");
@@ -538,214 +552,6 @@ $("rebootnow").addEventListener("click", async () => {
   } catch (e) {
     $("rebooterr").textContent = String(e);
   }
-});
-
-// ---- profiles ----
-
-interface Profile {
-  label: string;
-  description: string;
-  utilities: string[];
-}
-
-let builtinProfiles: Profile[] | null = null;
-let imported: { file: string; profiles: Profile[] } | null = null;
-
-function profileError(e: unknown) {
-  $("profileerr").textContent = e ? String(e) : "";
-}
-
-// Like linux_util's own profiles, choosing one replaces the selection. Names
-// this distro does not offer are left out and listed.
-function applyProfile(p: Profile) {
-  const known = new Set(utilities.map((u) => u.name));
-  const available = p.utilities.filter((n) => known.has(n));
-  const missing = p.utilities.filter((n) => !known.has(n));
-  if (!available.length) {
-    profileError(`None of the utilities in "${p.label}" are available on this distro.`);
-    return;
-  }
-  picked.clear();
-  for (const n of available) picked.add(n);
-  $("selnote").textContent =
-    `from "${p.label}"` + (missing.length ? `; not available on this distro: ${missing.join(", ")}` : "");
-  $<HTMLDialogElement>("profiles").close();
-  render();
-}
-
-function profileSection(title: string, profiles: Profile[]): HTMLElement[] {
-  const known = new Set(utilities.map((u) => u.name));
-  const heading = document.createElement("h3");
-  heading.textContent = title;
-  return [
-    heading,
-    ...profiles.map((p) => {
-      const item = document.createElement("div");
-      item.className = "profile";
-      const text = document.createElement("div");
-      const label = document.createElement("strong");
-      label.textContent = p.label;
-      text.append(label);
-      const count = p.utilities.filter((n) => known.has(n)).length;
-      const notes = [p.description];
-      if (count < p.utilities.length) notes.push(`${p.utilities.length - count} not available on this distro`);
-      for (const note of notes.filter(Boolean)) {
-        const line = document.createElement("p");
-        line.className = "muted";
-        line.textContent = note;
-        text.append(line);
-      }
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = `Select (${count})`;
-      button.disabled = count === 0;
-      button.addEventListener("click", () => applyProfile(p));
-      item.append(text, button);
-      return item;
-    }),
-  ];
-}
-
-function renderProfiles() {
-  const list = $("profilelist");
-  const parts: HTMLElement[] = [];
-  if (builtinProfiles === null) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Loading profiles…";
-    parts.push(p);
-  } else if (builtinProfiles.length) {
-    parts.push(...profileSection("Built into linux_util", builtinProfiles));
-  }
-  if (imported) parts.push(...profileSection(`From ${imported.file}`, imported.profiles));
-  list.replaceChildren(...parts);
-  $<HTMLButtonElement>("profileexport").disabled = picked.size === 0;
-}
-
-async function openProfiles() {
-  profileError(null);
-  renderProfiles();
-  $<HTMLDialogElement>("profiles").showModal();
-  if (builtinProfiles !== null) return;
-  try {
-    builtinProfiles = await invoke<Profile[]>("list_profiles");
-  } catch (e) {
-    builtinProfiles = [];
-    profileError(e);
-  }
-  renderProfiles();
-}
-
-$("openprofiles").addEventListener("click", openProfiles);
-$("profileclose").addEventListener("click", () => $<HTMLDialogElement>("profiles").close());
-$("profileimport").addEventListener("click", async () => {
-  profileError(null);
-  try {
-    const result = await invoke<{ file: string; profiles: Profile[] } | null>("import_profile");
-    if (!result) return;
-    imported = result;
-    if (result.profiles.length === 1) applyProfile(result.profiles[0]);
-    else renderProfiles();
-  } catch (e) {
-    profileError(e);
-  }
-});
-$<HTMLFormElement>("exportform").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  profileError(null);
-  const label = $<HTMLInputElement>("profilename").value.trim();
-  const names = utilities.filter((u) => picked.has(u.name)).map((u) => u.name);
-  if (!label || !names.length) return;
-  try {
-    const file = await invoke<string | null>("export_profile", { label, utilities: names });
-    if (!file) return;
-    $("selnote").textContent = `saved to ${file}`;
-    $<HTMLDialogElement>("profiles").close();
-  } catch (e) {
-    profileError(e);
-  }
-});
-
-// ---- logs ----
-
-interface LogFile {
-  name: string;
-  size: number;
-  modified: number;
-}
-
-let logShown = "";
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function showLog(name: string) {
-  $("logerr").textContent = "";
-  for (const b of Array.from($("loglist").querySelectorAll("button"))) {
-    b.setAttribute("aria-current", String(b.dataset.name === name));
-  }
-  try {
-    const log = await invoke<{ path: string; text: string; truncated: boolean }>("read_log", { name });
-    logShown = log.text;
-    $("logview").textContent = log.text;
-    $("logview").scrollTop = $("logview").scrollHeight;
-    $("logpath").textContent = log.truncated ? `${log.path} (showing the end of a long log)` : log.path;
-  } catch (e) {
-    logShown = "";
-    $("logview").textContent = "";
-    $("logerr").textContent = String(e);
-  }
-}
-
-async function refreshLogs() {
-  $("logerr").textContent = "";
-  let files: LogFile[] = [];
-  try {
-    files = await invoke<LogFile[]>("list_logs");
-  } catch (e) {
-    $("logerr").textContent = String(e);
-  }
-  const items = files.map((f) => {
-    const li = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.name = f.name;
-    const name = document.createElement("span");
-    name.textContent = f.name;
-    const meta = document.createElement("span");
-    meta.className = "muted";
-    meta.textContent = `${new Date(f.modified * 1000).toLocaleString()} · ${formatSize(f.size)}`;
-    button.append(name, meta);
-    button.addEventListener("click", () => showLog(f.name));
-    li.append(button);
-    return li;
-  });
-  $("loglist").replaceChildren(...items);
-  logShown = "";
-  $("logview").textContent = "";
-  $("logpath").textContent = "";
-  if (files.length) await showLog(files[0].name);
-  else $("logview").textContent = "No logs yet. linux_util writes them when an install, uninstall or update runs.";
-}
-
-$("openlogs").addEventListener("click", () => {
-  $<HTMLDialogElement>("logs").showModal();
-  refreshLogs();
-});
-$("logrefresh").addEventListener("click", refreshLogs);
-$("logsclose").addEventListener("click", () => $<HTMLDialogElement>("logs").close());
-$("logcopy").addEventListener("click", async () => {
-  const button = $("logcopy");
-  try {
-    await navigator.clipboard.writeText(logShown);
-    button.textContent = "Copied";
-  } catch {
-    button.textContent = "Copy failed";
-  }
-  setTimeout(() => (button.textContent = "Copy"), 1500);
 });
 
 // ---- settings ----
@@ -766,7 +572,7 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
   {
     key: "auto_confirm",
     label: "Answer yes to installer questions",
-    help: "Some installers ask before a risky step, such as deleting the cloud-init user, switching the login screen or resetting repositories. The app has no terminal to answer in, so they are answered no unless this is on.",
+    help: "Some installers ask before a risky step, such as deleting the cloud-init user, switching the login screen or resetting repositories. Off, they ask in the run panel; on, they go ahead without asking.",
     kind: "bool",
     def: "false",
   },
@@ -777,6 +583,12 @@ const LU_FIELDS: { key: string; label: string; help: string; kind: "bool" | "int
 ];
 
 let settings: Settings = { theme: "system", check_updates: true, beta_updates: false, linux_util: {} };
+
+// auto_confirm skips installer questions, so say so where runs start.
+function showAutoConfirm(s: Settings) {
+  $("autoconfirm").hidden = s.linux_util.auto_confirm !== "true";
+}
+$("autoconfirm").addEventListener("click", () => $("opensettings").click());
 
 function applyTheme(theme: Theme) {
   if (theme === "system") delete document.documentElement.dataset.theme;
@@ -836,6 +648,7 @@ function readSettings(): Settings {
 $("opensettings").addEventListener("click", () => {
   $("settingserr").textContent = "";
   fillSettings(settings);
+  fillShortcuts();
   $<HTMLDialogElement>("settings").showModal();
 });
 $("settingsreset").addEventListener("click", () => fillSettings({ theme: "system", check_updates: true, beta_updates: false, linux_util: {} }));
@@ -847,6 +660,8 @@ $<HTMLFormElement>("settingsform").addEventListener("submit", async (ev) => {
     await invoke("save_settings", { settings: next });
     settings = next;
     applyTheme(settings.theme);
+    showAutoConfirm(settings);
+    await applyShortcuts();
     $<HTMLDialogElement>("settings").close();
   } catch (e) {
     $("settingserr").textContent = String(e);
@@ -1104,6 +919,7 @@ function saveSidebarWidth() {
 invoke<Settings>("get_settings").then((s) => {
   settings = s;
   applyTheme(s.theme);
+  showAutoConfirm(s);
   if (s.check_updates) checkUpdate(false);
 });
 invoke<string | null>("detected_distro").then((d) => {
@@ -1111,4 +927,8 @@ invoke<string | null>("detected_distro").then((d) => {
   $("distro").textContent = d;
   $("distro").title = d;
 });
+// Ask for the sudo password now, as linux_util does before its menu.
+invoke("start_session")
+  .catch(() => {})
+  .finally(offerShortcuts);
 load();

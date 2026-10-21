@@ -77,22 +77,14 @@ fn format_utc(secs: i64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rem / 3_600,
-        rem % 3_600 / 60,
-        rem % 60
-    )
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rem / 3_600, rem % 3_600 / 60, rem % 60)
 }
 
 /// The profiles built into the bundled linux_util, via `--export-profile`.
 #[tauri::command]
 pub async fn list_profiles(app: AppHandle) -> Result<Vec<Profile>, String> {
     let mut cmd = crate::script_command(&app, &crate::script_path(&app)?);
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("No app cache directory: {e}"))?;
+    let dir = app.path().app_cache_dir().map_err(|e| format!("No app cache directory: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
         let out = dir.join(format!("profiles-{}.json", std::process::id()));
@@ -127,11 +119,7 @@ fn file_dialog(app: &AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<tauri:
 /// Asks for a profile file and returns its profiles; `None` if the user cancelled.
 #[tauri::command]
 pub async fn import_profile(app: AppHandle) -> Result<Option<Imported>, String> {
-    let Some(picked) = file_dialog(&app)
-        .set_title("Import profile")
-        .add_filter("Profile (JSON)", &["json"])
-        .blocking_pick_file()
-    else {
+    let Some(picked) = file_dialog(&app).set_title("Import profile").add_filter("Profile (JSON)", &["json"]).blocking_pick_file() else {
         return Ok(None);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
@@ -154,10 +142,7 @@ pub async fn export_profile(app: AppHandle, label: String, utilities: Vec<String
     if utilities.is_empty() {
         return Err("Nothing selected to export".to_string());
     }
-    let suggested: String = label
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
+    let suggested: String = label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
     let Some(picked) = file_dialog(&app)
         .set_title("Export profile")
         .set_file_name(format!("{suggested}.json"))

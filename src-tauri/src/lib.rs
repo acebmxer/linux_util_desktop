@@ -2,6 +2,7 @@ mod actions;
 mod logs;
 mod profiles;
 mod settings;
+mod shortcuts;
 mod update;
 mod window_state;
 
@@ -72,16 +73,8 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Ok(dir) = app.path().resource_dir() {
         candidates.push(dir.join("vendor").join("linux_util.sh"));
     }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("vendor")
-            .join("linux_util.sh"),
-    );
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .ok_or_else(|| "Bundled linux_util.sh not found".to_string())
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("vendor").join("linux_util.sh"));
+    candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| "Bundled linux_util.sh not found".to_string())
 }
 
 /// `bash <script>` with the host's environment (see `use_host_env`) and the
@@ -89,6 +82,9 @@ pub(crate) fn script_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 pub(crate) fn script_command(app: &tauri::AppHandle, script: &std::path::Path) -> Command {
     let mut cmd = Command::new("bash");
     use_host_env(&mut cmd);
+    // The bundled copy is updated with the app, not by git, so linux_util's
+    // own update check could only warn that it is not a git checkout.
+    cmd.env("LINUX_UTIL_NO_SELF_UPDATE", "1");
     if let Some(conf) = settings::linux_util_conf_path(app) {
         cmd.env("LINUX_UTIL_CONFIG_FILE", conf);
     }
@@ -141,11 +137,7 @@ fn with_descriptions(json: &str, script: &std::path::Path) -> String {
     let descriptions = read_descriptions(script);
     if let Some(items) = doc.get_mut("utilities").and_then(|u| u.as_array_mut()) {
         for item in items {
-            let found = item
-                .get("name")
-                .and_then(|n| n.as_str())
-                .and_then(|n| descriptions.get(n))
-                .cloned();
+            let found = item.get("name").and_then(|n| n.as_str()).and_then(|n| descriptions.get(n)).cloned();
             if let (Some(text), Some(obj)) = (found, item.as_object_mut()) {
                 obj.insert("description".into(), text.into());
             }
@@ -201,18 +193,11 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
     let script = script_path(&app)?;
     let mut cmd = script_command(&app, &script);
     tauri::async_runtime::spawn_blocking(move || {
-        let output = cmd
-            .args(["--list", "--json", "--no-color"])
-            .output()
-            .map_err(|e| format!("Could not start linux_util.sh: {e}"))?;
+        let output = cmd.args(["--list", "--json", "--no-color"]).output().map_err(|e| format!("Could not start linux_util.sh: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "linux_util.sh --list failed ({}): {}",
-                output.status,
-                stderr.trim()
-            ));
+            return Err(format!("linux_util.sh --list failed ({}): {}", output.status, stderr.trim()));
         }
         match stdout.find('{') {
             Some(start) => Ok(with_menu_order(&with_descriptions(&stdout[start..], &script), &script)),
@@ -226,18 +211,20 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
 /// The distro's display name from `/etc/os-release` (falls back to `/usr/lib`).
 #[tauri::command]
 fn detected_distro() -> Option<String> {
-    let text = std::fs::read_to_string("/etc/os-release")
-        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
-        .ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix("PRETTY_NAME="))
-        .map(|v| v.trim().trim_matches('"').to_string())
-        .filter(|v| !v.is_empty())
+    let text = std::fs::read_to_string("/etc/os-release").or_else(|_| std::fs::read_to_string("/usr/lib/os-release")).ok()?;
+    text.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
 }
 
 /// Entry point for `SUDO_ASKPASS` (`--askpass`): no window, just print the password.
 pub fn askpass() -> ! {
     actions::askpass_client()
+}
+
+/// True when running inside WSL (WSL 1 and 2 both set `WSL_DISTRO_NAME`).
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|v| v.to_lowercase().contains("microsoft")).unwrap_or(false)
 }
 
 pub fn run() {
@@ -252,6 +239,18 @@ pub fn run() {
     // Respect an explicit setting from the user's environment.
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
+    // Under WSLg, WebKitGTK crashes (segmentation fault) when it renders through
+    // the "dzn" Vulkan-over-DirectX driver, so on WSL render in software.
+    // Respect explicit settings from the user's environment.
+    #[cfg(target_os = "linux")]
+    if is_wsl() {
+        for var in ["LIBGL_ALWAYS_SOFTWARE", "WEBKIT_DISABLE_COMPOSITING_MODE"] {
+            if std::env::var_os(var).is_none() {
+                std::env::set_var(var, "1");
+            }
+        }
     }
 
     tauri::Builder::default()
@@ -279,7 +278,7 @@ pub fn run() {
             actions::send_input,
             actions::reboot_needed,
             actions::reboot_now,
-            actions::forget_password,
+            actions::start_session,
             profiles::list_profiles,
             profiles::import_profile,
             profiles::export_profile,
@@ -287,6 +286,10 @@ pub fn run() {
             window_state::get_sidebar_width,
             window_state::set_sidebar_width,
             settings::save_settings,
+            shortcuts::shortcut_status,
+            shortcuts::shortcuts_asked,
+            shortcuts::add_shortcuts,
+            shortcuts::remove_shortcuts,
             logs::list_logs,
             logs::read_log,
             update::version_info,

@@ -3,11 +3,13 @@
 //! The check reads the latest stable release of this repo, or, when the
 //! "beta updates" setting is on, the newest release including beta
 //! pre-releases. Installing downloads the
-//! file that matches how the app was installed, checks it against the
-//! release's `SHA256SUMS`, and then either hands a `.deb` or `.rpm` to the
-//! system package manager through the same password dialog the install actions
-//! use, or replaces the AppImage file in place. Nothing is downloaded without a
-//! click, and no checksum means no install.
+//! file that matches how the app was installed, checks the release's
+//! `SHA256SUMS` against its signature (`SHA256SUMS.minisig`, made by the
+//! Release workflow with this project's minisign key) and the file against
+//! those sums, and then either hands a `.deb` or `.rpm` to the system package
+//! manager through the same password dialog the install actions use, or
+//! replaces the AppImage file in place. Nothing is downloaded without a click,
+//! and no valid signature or checksum means no install.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use minisign_verify::{PublicKey, Signature};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
@@ -23,13 +26,23 @@ use crate::actions::{self, RunState};
 
 const REPO: &str = "acebmxer/linux_util_desktop";
 /// Replaces the GitHub API address for the release check and lifts the
-/// download address restriction. Only for testing against a local server.
+/// download address restriction, for testing against a local server. Read by
+/// debug builds only; a release build always uses GitHub.
 const RELEASES_URL_ENV: &str = "LU_RELEASES_URL";
+/// With `LU_RELEASES_URL` in a debug build: a minisign public key file to check
+/// the local server's signature with, instead of the project's own key.
+const RELEASES_KEY_ENV: &str = "LU_RELEASES_KEY";
 const SUMS_NAME: &str = "SHA256SUMS";
+const SIG_NAME: &str = "SHA256SUMS.minisig";
+/// The public half of the key the Release workflow signs `SHA256SUMS` with
+/// (repo secret `MINISIGN_SECRET_KEY`). The workflow checks its signature with
+/// this same file before publishing. A new key pair means apps built with the
+/// old public key can no longer verify updates.
+const SIGNING_KEY: &str = include_str!("../minisign.pub");
 /// Largest download accepted: the AppImage is well under this.
 const MAX_DOWNLOAD: u64 = 1 << 30;
 const MAX_NOTES: usize = 20_000;
-/// Set by the dev-branch release build to its workflow run number; a stable
+/// Set by the dev-branch release build to its beta number; a stable
 /// build has none. It tells the update check which beta this copy is.
 const BETA_BUILD: Option<&str> = option_env!("LU_BETA_BUILD");
 /// Sorts a stable release above every beta of the same version.
@@ -79,6 +92,7 @@ struct Plan {
     method: Method,
     file: (String, String),
     sums: String,
+    sig: String,
 }
 
 impl Plan {
@@ -106,11 +120,7 @@ fn parse_release(tag: &str) -> Option<Rank> {
     let tag = tag.trim().trim_start_matches('v');
     let beta = match tag.split_once('-') {
         None => STABLE,
-        Some((_, pre)) => pre
-            .strip_prefix("beta.")
-            .and_then(|n| n.split('+').next())
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0),
+        Some((_, pre)) => pre.strip_prefix("beta.").and_then(|n| n.split('+').next()).and_then(|n| n.parse().ok()).unwrap_or(0),
     };
     Some((version, beta))
 }
@@ -140,9 +150,14 @@ fn agent(download: bool) -> ureq::Agent {
     builder.build().into()
 }
 
+/// The release check's address, and whether it is the test override.
 fn releases_url(beta: bool) -> (String, bool) {
-    match std::env::var(RELEASES_URL_ENV) {
-        Ok(url) if !url.is_empty() => (url, true),
+    releases_url_from(std::env::var(RELEASES_URL_ENV).ok(), cfg!(debug_assertions), beta)
+}
+
+fn releases_url_from(override_url: Option<String>, debug_build: bool, beta: bool) -> (String, bool) {
+    match override_url {
+        Some(url) if debug_build && !url.is_empty() => (url, true),
         // `latest` never returns a pre-release; the list does.
         _ if beta => (format!("https://api.github.com/repos/{REPO}/releases?per_page=30"), false),
         _ => (format!("https://api.github.com/repos/{REPO}/releases/latest"), false),
@@ -186,10 +201,7 @@ fn fetch_release(beta: bool) -> Result<Release, String> {
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("Could not check for updates: {e}"))?;
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("Could not read the release information: {e}"))?;
+    let text = response.body_mut().read_to_string().map_err(|e| format!("Could not read the release information: {e}"))?;
     let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
     match doc.as_array() {
         None => release_from(&doc, overridden),
@@ -232,10 +244,19 @@ fn plan(release: &Release) -> Result<Plan, String> {
         Method::Deb => format!("linux_util_desktop_{v}_amd64.deb"),
         Method::Rpm(_) => format!("linux_util_desktop-{v}-1.x86_64.rpm"),
     };
+    let (file, sums, sig) = release_files(release, &name)?;
+    Ok(Plan { method, file, sums, sig })
+}
+
+/// The release's file `name` (name, address) and the addresses of its
+/// `SHA256SUMS` and the signature. A release without either cannot be checked.
+fn release_files(release: &Release, name: &str) -> Result<((String, String), String, String), String> {
+    let v = &release.version;
     let find = |wanted: &str| release.assets.iter().find(|(n, _)| n == wanted).cloned();
-    let file = find(&name).ok_or_else(|| format!("Release {v} has no {name}."))?;
+    let file = find(name).ok_or_else(|| format!("Release {v} has no {name}."))?;
     let sums = find(SUMS_NAME).ok_or_else(|| format!("Release {v} has no {SUMS_NAME}, so the download cannot be checked."))?;
-    Ok(Plan { method, file, sums: sums.1 })
+    let sig = find(SIG_NAME).ok_or_else(|| format!("Release {v} has no {SIG_NAME}, so the download cannot be checked."))?;
+    Ok((file, sums.1, sig.1))
 }
 
 /// The hash `sums` (the `sha256sum` format) lists for `name`.
@@ -243,9 +264,28 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let (hash, file) = line.split_once(char::is_whitespace)?;
         let file = file.trim_start().trim_start_matches('*');
-        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| hash.to_ascii_lowercase())
+        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
     })
+}
+
+/// The minisign public key file release signatures are checked with: the
+/// project's own, or in a debug build pointed at a local server, the file
+/// named by `LU_RELEASES_KEY` when it is set.
+fn signing_key() -> Result<String, String> {
+    match std::env::var(RELEASES_KEY_ENV).ok().filter(|k| !k.is_empty()) {
+        Some(path) if releases_url(false).1 => std::fs::read_to_string(&path).map_err(|e| format!("Could not read {path}: {e}")),
+        _ => Ok(SIGNING_KEY.to_string()),
+    }
+}
+
+/// Checks that `sig` (the text of a `.minisig` file) is a signature of `sums`
+/// by `key` (the text of a minisign public key file). Only the prehashed
+/// signatures current minisign makes are accepted.
+fn check_signature(key: &str, sums: &[u8], sig: &str) -> Result<(), String> {
+    let key = PublicKey::decode(key).map_err(|e| format!("The release signing key is unreadable: {e}"))?;
+    let sig = Signature::decode(sig).map_err(|e| format!("{SIG_NAME} is not a minisign signature: {e}. Nothing was installed."))?;
+    key.verify(sums, &sig, false)
+        .map_err(|e| format!("{SUMS_NAME} is not signed with this project's release key ({e}). Nothing was installed."))
 }
 
 fn sha256_of(path: &Path) -> std::io::Result<String> {
@@ -302,12 +342,14 @@ fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
 /// against the release's checksums. Returns the verified file's path.
 fn fetch_verified(app: &AppHandle, plan: &Plan, dest_dir: &Path, file_name: &str) -> Result<PathBuf, String> {
     let (name, url) = &plan.file;
-    actions::emit_output(app, &format!("Downloading {SUMS_NAME}"), false);
-    let sums = agent(false)
-        .get(&plan.sums)
-        .call()
-        .and_then(|mut r| r.body_mut().read_to_string())
-        .map_err(|e| format!("Could not download {SUMS_NAME}: {e}"))?;
+    let fetch_text = |url: &str, what: &str| {
+        actions::emit_output(app, &format!("Downloading {what}"), false);
+        agent(false).get(url).call().and_then(|mut r| r.body_mut().read_to_string()).map_err(|e| format!("Could not download {what}: {e}"))
+    };
+    let sums = fetch_text(&plan.sums, SUMS_NAME)?;
+    let sig = fetch_text(&plan.sig, SIG_NAME)?;
+    check_signature(&signing_key()?, sums.as_bytes(), &sig)?;
+    actions::emit_output(app, &format!("{SUMS_NAME} is signed with this project's release key"), false);
     let expected = expected_hash(&sums, name).ok_or_else(|| format!("{SUMS_NAME} does not list {name}."))?;
     actions::emit_output(app, &format!("Downloading {name}"), false);
     let dest = dest_dir.join(file_name);
@@ -335,20 +377,14 @@ impl Scratch {
         std::fs::create_dir_all(&base).map_err(|e| format!("Could not create {}: {e}", base.display()))?;
         let dir = base.join(format!("update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
         Ok(Scratch(dir))
     }
 
     /// A new private folder inside `base`. Created exclusively under a fresh
     /// name, so nothing another user put in `base` can be reused or followed.
     fn new_in(base: &Path) -> Result<Self, String> {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
         let mut last = None;
         for n in 0..16 {
             let dir = base.join(format!(".linux-util-desktop-update-{}-{stamp}-{n}", std::process::id()));
@@ -578,6 +614,61 @@ mod tests {
         assert!(!download_allowed("https://github.com/other/repo/releases/download/v1/x.deb", false));
         assert!(!download_allowed("http://example.com/x.deb", false));
         assert!(download_allowed("http://127.0.0.1:1/x.deb", true));
+    }
+
+    #[test]
+    fn release_builds_ignore_the_test_address() {
+        let local = Some("http://127.0.0.1:1/releases/latest".to_string());
+        let github = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        assert_eq!(releases_url_from(local.clone(), false, false), (github.clone(), false));
+        assert_eq!(releases_url_from(local.clone(), true, false), (local.clone().unwrap(), true));
+        assert_eq!(releases_url_from(Some(String::new()), true, false), (github.clone(), false));
+        assert_eq!(releases_url_from(None, true, false), (github, false));
+        assert!(!releases_url_from(local, false, true).1);
+    }
+
+    // Made with minisign 0.11 (Ubuntu 24.04, as the Release workflow uses):
+    // `minisign -G -W`, then `minisign -S` on TEST_SUMS.
+    const TEST_KEY: &str =
+        "untrusted comment: minisign public key D642377EC38CC1F1\nRWTxwYzDfjdC1rHDmfq4zP3g82ShmlHIck1ghjGRh1m5CgQbAsqhuAf6\n";
+    const OTHER_KEY: &str =
+        "untrusted comment: minisign public key 63D659FA7FE86C55\nRWRVbOh/+lnWY+vHAWmG1rrUctVDLoApco1drR72hDZ1SbWSuzS5jqS6\n";
+    const TEST_SUMS: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  linux_util_desktop_9.9.9_amd64.deb\n";
+    const TEST_SIG: &str = "untrusted comment: signature from minisign secret key\n\
+RUTxwYzDfjdC1ihDjZ4RspJ+UYMRjxUZJuGceLMeRjj3fb2hUDEl1nZZ8C7MTZIG+iqDqWkzCSkJSk5kHJNuHR05XIRJM8G4twY=\n\
+trusted comment: timestamp:1792404970\tfile:SUMS\thashed\n\
+fzp9YfNPf0p6vwOIvK0zXwTKcRAgXx7TSH2DBfRUOO9eQhpM4ah5pauiaFCRI0uJne2peK2dM9PPRPPr+8eqAg==\n";
+
+    #[test]
+    fn signed_sums_are_accepted() {
+        assert_eq!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), TEST_SIG), Ok(()));
+    }
+
+    #[test]
+    fn changed_sums_wrong_key_or_bad_signature_are_refused() {
+        let changed = TEST_SUMS.replacen('a', "b", 1);
+        assert!(check_signature(TEST_KEY, changed.as_bytes(), TEST_SIG).is_err());
+        assert!(check_signature(OTHER_KEY, TEST_SUMS.as_bytes(), TEST_SIG).is_err());
+        assert!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), "").is_err());
+        assert!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), "not a signature").is_err());
+    }
+
+    #[test]
+    fn the_built_in_key_is_readable() {
+        assert!(PublicKey::decode(SIGNING_KEY).is_ok());
+    }
+
+    #[test]
+    fn release_without_a_signature_cannot_be_installed() {
+        let asset = |n: &str| serde_json::json!({"name": n, "browser_download_url": format!("https://github.com/{REPO}/releases/download/v9.9.9/{n}")});
+        let deb = "linux_util_desktop_9.9.9_amd64.deb";
+        let unsigned = serde_json::json!({"tag_name": "v9.9.9", "assets": [asset(deb), asset(SUMS_NAME)]});
+        let err = release_files(&release_from(&unsigned, false).unwrap(), deb).unwrap_err();
+        assert!(err.contains(SIG_NAME), "{err}");
+        let signed = serde_json::json!({"tag_name": "v9.9.9", "assets": [asset(deb), asset(SUMS_NAME), asset(SIG_NAME)]});
+        let (file, sums, sig) = release_files(&release_from(&signed, false).unwrap(), deb).unwrap();
+        assert_eq!(file.0, deb);
+        assert!(sums.ends_with(SUMS_NAME) && sig.ends_with(SIG_NAME));
     }
 
     #[test]
