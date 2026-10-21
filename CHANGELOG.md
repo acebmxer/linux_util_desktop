@@ -11,6 +11,8 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Added
 
 - **Desktop icon, taskbar icon and app menu entry.** On its first launch the
@@ -25,6 +27,7 @@ release is cut.
 
 ### Changed
 
+- **Bundles linux_util v1.10.0** (was v1.9.0), which lists 245 utilities.
 - **The administrator password is asked once, when the app starts,** as
   linux_util asks before its menu, instead of at the start of every run, even
   runs that needed no administrator rights. It is kept in memory only and asked
