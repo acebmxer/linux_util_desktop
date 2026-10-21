@@ -42,10 +42,16 @@ pub(super) fn password_ok(real_sudo: &Path, password: &str) -> bool {
 /// True when sudo is set up to run without a password (NOPASSWD). A login
 /// cached from earlier does not count (`-k`): it is tied to another terminal,
 /// so the scripts' own terminals could not use it.
+///
+/// Checked with `sudo -v`, which linux_util runs at the start of every run,
+/// rather than with a command: under sudo's default `verifypw=all`, `-v` still
+/// wants a password when any of the user's rules lacks NOPASSWD. Fedora's WSL
+/// image gives its first user both `%wheel ALL=(ALL) ALL` and a NOPASSWD rule,
+/// so commands run without a password but `sudo -v` asks for one.
 pub(super) fn sudo_without_password(real_sudo: &Path) -> bool {
     let mut cmd = Command::new(real_sudo);
     crate::use_host_env(&mut cmd);
-    cmd.args(["-n", "-k", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["-n", "-k", "-v"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     matches!(cmd.status(), Ok(s) if s.success())
 }
 
@@ -116,6 +122,18 @@ pub(super) fn keep_password(state: &RunState, real_sudo: &Path, password: String
     session.password = Some(password);
     session.timeout = timeout;
     session.idle_since = if running { None } else { Some(Instant::now()) };
+}
+
+/// The session's password, or the one `ask` returns, which is then kept for
+/// the session. The session lock is let go before asking: `keep_password`
+/// takes it again, and a `Mutex` locked twice by one thread never returns.
+pub(super) fn held_or_ask(state: &RunState, real_sudo: &Path, ask: impl FnOnce() -> Option<String>) -> Option<String> {
+    let held = lock(&state.session).password();
+    held.or_else(|| {
+        let pw = ask()?;
+        keep_password(state, real_sudo, pw.clone());
+        Some(pw)
+    })
 }
 
 /// The pid and uid of the process that connected `stream`, from the kernel.
@@ -191,13 +209,8 @@ pub(super) fn serve_askpass(app: AppHandle, listener: UnixListener, real_sudo: P
         if denied {
             continue; // dropping the stream makes askpass exit 1
         }
-        denied = !answer_askpass(&mut stream, std::process::id(), &mut || {
-            lock(&state.session).password().or_else(|| {
-                let pw = ask_password(&app, &real_sudo)?;
-                keep_password(&state, &real_sudo, pw.clone());
-                Some(pw)
-            })
-        });
+        denied =
+            !answer_askpass(&mut stream, std::process::id(), &mut || held_or_ask(&state, &real_sudo, || ask_password(&app, &real_sudo)));
     }
 }
 
@@ -329,6 +342,42 @@ mod tests {
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(*lock(&answered), 4, "only the four requests from inside the run were answered");
+    }
+
+    /// A password first asked for during a run (none held: the start-up dialog
+    /// was skipped or cancelled, or the held one timed out) is handed over and
+    /// kept. Holding the session lock while asking deadlocked here: the dialog
+    /// stayed on "Checking…" and the run never ended (#14).
+    #[test]
+    fn password_asked_during_a_run_is_returned_and_kept() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let state = RunState::default();
+            // No sudo there, so keep_password falls back to sudo's default timeout.
+            let missing = Path::new("/nonexistent/sudo");
+            let first = held_or_ask(&state, missing, || Some("pw".to_string()));
+            let second = held_or_ask(&state, missing, || panic!("a held password must not be asked for again"));
+            let _ = tx.send((first, second));
+        });
+        let (first, second) = rx.recv_timeout(Duration::from_secs(5)).expect("asking for the password during a run hung");
+        assert_eq!(first.as_deref(), Some("pw"));
+        assert_eq!(second.as_deref(), Some("pw"));
+    }
+
+    /// The start-up check against a real sudo. Needs a prepared sudoers, so it
+    /// runs only when asked, in a throwaway container, with what the check
+    /// should say for that setup:
+    /// `LUD_EXPECT_NOPASSWD=yes|no cargo test --lib start_up_check -- --ignored`
+    #[test]
+    #[ignore]
+    fn start_up_check_matches_sudo() {
+        let expect = match std::env::var("LUD_EXPECT_NOPASSWD").expect("LUD_EXPECT_NOPASSWD").as_str() {
+            "yes" => true,
+            "no" => false,
+            other => panic!("LUD_EXPECT_NOPASSWD must be yes or no, not {other}"),
+        };
+        let sudo = find_in_path("sudo").expect("sudo on PATH");
+        assert_eq!(sudo_without_password(&sudo), expect);
     }
 
     #[test]

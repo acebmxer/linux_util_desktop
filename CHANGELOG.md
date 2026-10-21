@@ -29,6 +29,12 @@ release is cut.
   linux_util asks before its menu, instead of at the start of every run, even
   runs that needed no administrator rights. It is kept in memory only and asked
   again only once sudo's own timeout has passed with nothing running.
+
+  Systems where commands run without a password but `sudo -v` still asks for
+  one, such as Fedora on WSL (its first user has both the `wheel` rule and a
+  NOPASSWD rule), are now asked at start-up too. The app used to skip the
+  question there and ask in the middle of the first run, because linux_util
+  starts every run with `sudo -v` (#14).
 - **The run panel shows the run as a terminal window does.** Output arrives as
   one stream in the order it was written, with linux_util's colours, spinners
   and package-manager progress bars, and "Copy log" copies what is on screen.
@@ -99,6 +105,11 @@ release is cut.
   password socket and be handed the password. The app now asks the kernel who
   connected and answers only processes it started itself; any other program
   gets nothing, and the run's own sudo still gets the password after it.
+
+  When the password was first asked for during a run rather than at start-up,
+  the run then hung: the dialog stayed on "Checking…" after the password was
+  entered, Cancel stopped the script but the run never ended, and no other
+  action could start until the app was closed (#14).
 - **Release builds no longer read `LU_RELEASES_URL`** (#10). The variable
   pointed the update check at another server and let it download from any
   address; it was meant for testing only. Only debug builds read it now; a
