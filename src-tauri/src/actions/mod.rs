@@ -280,13 +280,13 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         cmd.env("PATH", &path)
             .env("SUDO_ASKPASS", work.askpass_path())
             .env(SOCKET_ENV, work.socket_path())
-            .env("BASH_ENV", work.prelude_path())
             // Nobody can page through output here, so pagers print and carry on.
             .env("PAGER", "cat")
             .env("SYSTEMD_PAGER", "cat")
             .env("GIT_PAGER", "cat");
         let slaves = pty.as_ref().and_then(|p| Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?]));
         let on_pty = slaves.is_some();
+        cmd.envs(question_env(&work.prelude_path(), on_pty));
         match slaves {
             Some([stdin, stdout, stderr]) => {
                 cmd.env("TERM", "xterm-256color").stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
@@ -333,21 +333,20 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         let detached = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let prompt = Arc::new(Mutex::new(Prompt::default()));
-        let no_changes = Arc::new(AtomicBool::new(false));
         // Reading the master ends with EIO once the script and its children exit.
         let mut master_for_mode = None;
         match pty {
             Some(Pty { master, slave }) => {
                 drop(slave);
                 master_for_mode = master.try_clone().ok();
-                pump(app.clone(), master, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+                pump(app.clone(), master, prompt.clone(), done_tx.clone(), detached.clone());
             }
             None => {
                 if let Some(out) = child.stdout.take() {
-                    pump(app.clone(), out, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+                    pump(app.clone(), out, prompt.clone(), done_tx.clone(), detached.clone());
                 }
                 if let Some(err) = child.stderr.take() {
-                    pump(app.clone(), err, prompt.clone(), no_changes.clone(), done_tx.clone(), detached.clone());
+                    pump(app.clone(), err, prompt.clone(), done_tx.clone(), detached.clone());
                 }
             }
         }
@@ -366,10 +365,8 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             inner.pid = None;
             inner.cancelled
         };
-        let mut code = status.as_ref().ok().and_then(|s| s.code());
-        if code == Some(1) && no_changes.load(Ordering::SeqCst) {
-            code = Some(3);
-        }
+        // linux_util exits 3 for "ran fine, nothing to change" (docs/CONTRACT.md).
+        let code = status.as_ref().ok().and_then(|s| s.code());
         let item_state = if cancelled {
             "cancelled"
         } else if matches!(code, Some(0 | 3)) {
@@ -389,6 +386,20 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
     lock(&state.session).idle_since = Some(Instant::now());
     let cancelled = lock(&state.inner).cancelled;
     let _ = app.emit("run-done", Done { ok, failed, cancelled });
+}
+
+/// The environment that lets the run panel see a question waiting.
+/// `LINUX_UTIL_GUI=1` makes linux_util signal its own questions (see
+/// docs/CONTRACT.md). Without a terminal its reads are not from one, so it
+/// sends nothing; the app's `read` wrapper is loaded instead, which also
+/// prints the `read -p` prompts bash leaves out when stdin is a pipe.
+/// linux_util does not load its own while the app's is loaded.
+fn question_env(prelude: &Path, on_pty: bool) -> Vec<(&'static str, std::ffi::OsString)> {
+    let mut env = vec![("LINUX_UTIL_GUI", "1".into())];
+    if !on_pty {
+        env.push(("BASH_ENV", prelude.as_os_str().to_owned()));
+    }
+    env
 }
 
 /// Starts a queue of `op` runs, one utility at a time. Progress arrives as the
@@ -691,16 +702,24 @@ mod tests {
     }
 
     /// A bash script on a fresh pty (stdin, stdout, stderr and controlling
-    /// terminal), with the app's `read` wrapper loaded, as a run starts it.
+    /// terminal), with the app's `read` wrapper loaded.
     /// Returns the child, the master, and everything read from the master.
     fn on_pty(script: &str) -> (std::process::Child, File, Arc<Mutex<Vec<u8>>>) {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let prelude = std::env::temp_dir().join(format!("lud-prelude-{}-{}.sh", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         std::fs::write(&prelude, READ_PRELUDE).unwrap();
+        spawn_on_pty(script, Some(&prelude))
+    }
+
+    /// `on_pty`, with the `BASH_ENV` file to load, if any.
+    fn spawn_on_pty(script: &str, bash_env: Option<&Path>) -> (std::process::Child, File, Arc<Mutex<Vec<u8>>>) {
         let pty = Pty::open().unwrap();
         let mut cmd = Command::new("bash");
+        cmd.env_remove("BASH_ENV");
+        if let Some(p) = bash_env {
+            cmd.env("BASH_ENV", p);
+        }
         cmd.args(["-c", script])
-            .env("BASH_ENV", &prelude)
             .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
             .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
             .stderr(Stdio::from(pty.slave.try_clone().unwrap()));
@@ -822,6 +841,74 @@ mod tests {
         master.write_all(b"abc\r").unwrap();
         finish(child, &out, "len:3");
         assert!(!text(&out).contains("abc"));
+    }
+
+    /// On a terminal a run gets `LINUX_UTIL_GUI=1` and not the app's wrapper,
+    /// so linux_util's own question signals are used; without one it gets the
+    /// app's wrapper, which linux_util then leaves in place.
+    #[test]
+    fn runs_use_linux_utils_signals_on_a_terminal() {
+        let prelude = Path::new("/run/x/prelude.sh");
+        let names =
+            |env: &[(&str, std::ffi::OsString)]| env.iter().map(|(k, v)| format!("{k}={}", v.to_string_lossy())).collect::<Vec<_>>();
+        assert_eq!(names(&question_env(prelude, true)), ["LINUX_UTIL_GUI=1"]);
+        assert_eq!(names(&question_env(prelude, false)), ["LINUX_UTIL_GUI=1", "BASH_ENV=/run/x/prelude.sh"]);
+    }
+
+    /// The signals the bundled linux_util sends from its own `read` wrapper
+    /// are the ones the run panel reads: a line, a single key, hidden input.
+    #[test]
+    fn bundled_linux_util_signals_are_understood() {
+        let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/lib/front_end.sh");
+        let script = format!(
+            "source {}; read -rp 'Name? ' a < /dev/tty; read -rn 1 b < /dev/tty; read -rsp 'Pw: ' c < /dev/tty; echo; echo \"got:$a$b${{#c}}\"",
+            shell_quote(&lib.to_string_lossy())
+        );
+        let (child, mut master, out) = spawn_on_pty(&script, None);
+        wait_for(&out, "\x1b]7701;wait;line;0\x07", 1);
+        master.write_all(b"x\r").unwrap();
+        wait_for(&out, "\x1b]7701;wait;key;0\x07", 1);
+        master.write_all(b"y").unwrap();
+        wait_for(&out, "\x1b]7701;wait;line;1\x07", 1);
+        master.write_all(b"abc\r").unwrap();
+        finish(child, &out, "got:xy3");
+        assert_eq!(count(&out, "\x1b]7701;done\x07"), 3);
+        let mut signals = Signals::default();
+        let (_, sigs) = signals.feed(&out.lock().unwrap());
+        assert_eq!(sigs, ["wait;line;0", "done", "wait;key;0", "done", "wait;line;1", "done"]);
+    }
+
+    /// The `sudo` shim no longer holds back `systemctl restart xrdp` while an
+    /// RDP session runs: linux_util decides that itself now.
+    #[test]
+    fn sudo_shim_passes_xrdp_restart_through() {
+        let dir = std::env::temp_dir().join(format!("lud-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let write_exec = |name: &str, body: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let real = write_exec("real-sudo", "#!/bin/sh\necho \"REAL: $*\"\n".to_string());
+        let shim = write_exec(
+            "sudo",
+            SUDO_SHIM
+                .replace("{REAL_SUDO}", &shell_quote(&real.to_string_lossy()))
+                .replace("{PRELUDE}", &shell_quote(&dir.join("prelude.sh").to_string_lossy())),
+        );
+        // A process named as an RDP session's, which the old shim looked for.
+        let session = dir.join("xrdp-sesexec");
+        std::fs::copy(find_in_path("sleep").unwrap(), &session).unwrap();
+        let mut sleeper = Command::new(&session).arg("30").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let out = Command::new(&shim).args(["systemctl", "restart", "xrdp"]).output().unwrap();
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "REAL: -A systemctl restart xrdp\n");
+        assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 
     #[test]

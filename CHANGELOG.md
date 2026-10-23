@@ -13,6 +13,11 @@ release is cut.
 
 ### Changed
 
+- **The run panel now relies on linux_util's own signals** instead of reading
+  its output text: linux_util says when a question is waiting, exits 3 when
+  there was nothing to change, and leaves xrdp running while anyone is
+  connected over RDP. The app's own versions of these are gone, apart from the
+  question signals for a run that could not get a terminal.
 - **Bundles linux_util v1.11.0** (was v1.10.0), which adds Xodus Nexus. Its
   Enable RDP → xrdp no longer restarts xrdp while anyone is connected over
   RDP, refuses to uninstall it then, and stops with an error on KDE when the

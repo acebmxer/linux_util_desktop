@@ -2,11 +2,14 @@
 // app passes still exist, and `--list --json` and `--export-profile` still have
 // the shape the app reads, and the config keys the Settings window writes are
 // still read from the file named by LINUX_UTIL_CONFIG_FILE, and the
-// LINUX_UTIL_NO_SELF_UPDATE switch runs set is still honoured.
+// LINUX_UTIL_NO_SELF_UPDATE switch runs set is still honoured. Also the
+// front-end signals the app relies on instead of reading output text: exit 3
+// for "nothing to change", the question signals with LINUX_UTIL_GUI=1, and no
+// xrdp restart while an RDP session is open.
 // Runs the script as the current (non-root) user from a temporary copy, since
 // linux_util.sh writes logs/ next to itself. No system changes are made.
-import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { copyFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +94,11 @@ try {
   } else {
     checkProfiles(readFileSync(exported, "utf8"));
   }
+
+  checkExitCodes(script);
+  checkFrontEndLoading(script);
+  checkQuestionSignals(join(work, "lib", "front_end.sh"));
+  checkXrdp(work);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
@@ -155,6 +163,117 @@ function checkProfiles(text) {
     fail(`--export-profile: ${bad.length} profiles lack a string label, description or utilities list`);
   }
   console.log(`contract: ${doc.profiles.length} profiles exported`);
+}
+
+// Runs a bash snippet; `args` become $1, $2, ... Helpers the snippet does not
+// define succeed silently (command_not_found_handle), so only what is checked
+// matters.
+function bash(snippet, args = [], env = {}) {
+  return spawnSync("bash", ["-c", `command_not_found_handle() { return 0; }\n${snippet}`, "bash", ...args], {
+    encoding: "utf8",
+    timeout: TIMEOUT_MS,
+    env: { ...process.env, ...env },
+  });
+}
+
+// --install/--uninstall/--update end in _cli_op: exit 0 when done, 3 when the
+// utility ran fine but had nothing to change, 1 when it failed. Only the codes
+// are relied on (the app counts 3 as success and offers no reboot for it); the
+// lines printed with them are not read.
+function checkExitCodes(script) {
+  const source = readFileSync(script, "utf8");
+  for (const op of ["install", "uninstall", "update"]) {
+    if (!new RegExp(`^\\s*_cli_op ${op} `, "m").test(source)) fail(`--${op} no longer ends in _cli_op`);
+  }
+  const cases = [
+    ["update", 0, 0],
+    ["update", 3, 3],
+    ["install", 3, 3],
+    ["install", 1, 1],
+    ["install", 2, 1],
+  ];
+  for (const [op, rc, want] of cases) {
+    const r = bash(
+      `eval "$(sed -n '/^_cli_op() {/,/^}/p' "$1")"
+       declare -A UNINSTALL_FUNCS=(); DRY_RUN=false
+       demo() { return "$DEMO_RC"; }
+       _cli_op "$2" "Demo Tool" demo`,
+      [script, op],
+      { DEMO_RC: String(rc) },
+    );
+    if (r.status !== want) {
+      fail(`--${op} of a utility returning ${rc} exits ${r.status}, expected ${want} (output ${JSON.stringify(r.stdout.trim())})`);
+    }
+  }
+  const updates = readFileSync(join(dirname(script), "lib", "installers", "system_updates.sh"), "utf8");
+  if (!/No package changes were made\.[^\n]*\n\s*return 3/.test(updates)) {
+    fail("System Updates no longer returns 3 after \"No package changes were made.\"");
+  }
+}
+
+// LINUX_UTIL_GUI=1 loads lib/front_end.sh, unless read() is already a
+// function (the app's own wrapper, loaded for runs without a terminal).
+function checkFrontEndLoading(script) {
+  const loads = (env) => {
+    const r = bash(`bash -x "$1" --version 2>&1`, [script], env);
+    return /^\++ (?:source|\.) \S*lib\/front_end\.sh$/m.test(r.stdout);
+  };
+  const wrapper = join(dirname(script), "own-read.sh");
+  writeFileSync(wrapper, "read() { builtin read \"$@\"; }\n");
+  if (!loads({ LINUX_UTIL_GUI: "1", BASH_ENV: "" })) fail("LINUX_UTIL_GUI=1 no longer loads lib/front_end.sh");
+  if (loads({ LINUX_UTIL_GUI: "", BASH_ENV: "" })) fail("lib/front_end.sh is loaded without LINUX_UTIL_GUI=1");
+  if (loads({ LINUX_UTIL_GUI: "1", BASH_ENV: wrapper })) fail("lib/front_end.sh is loaded over a read() that is already defined");
+}
+
+// On a terminal, lib/front_end.sh's read() sends ESC]7701;wait;<line|key>;<0|1>BEL
+// before a question and ESC]7701;doneBEL after it (src-tauri/src/actions/output.rs
+// reads them); a short timed read sends nothing.
+function checkQuestionSignals(lib) {
+  const has = spawnSync("bash", ["-c", "command -v script"], { encoding: "utf8" });
+  if (has.status !== 0) return fail("question signals: util-linux `script` is needed to give the check a terminal");
+  // The answers wait until the reads have started, as typed answers do.
+  const snippet = `source "$0"; read -rsn1 -t 0.05 z </dev/tty; read -rp "Name? " a </dev/tty; read -rn 1 b </dev/tty; read -rsp "Pw: " c </dev/tty; echo; echo "got=$a$b\${#c}"`;
+  const r = spawnSync(
+    "bash",
+    ["-c", `{ sleep 0.5; printf 'x\\n'; sleep 0.3; printf 'y'; sleep 0.3; printf 'abc\\n'; } | timeout -k 2 20 script -qefc "bash -c '$1' '$2'" /dev/null`, "bash", snippet, lib],
+    { encoding: "utf8", timeout: TIMEOUT_MS },
+  );
+  const signals = [...r.stdout.matchAll(/\x1b\]7701;([^\x07]*)\x07/g)].map((m) => m[1]);
+  const want = ["wait;line;0", "done", "wait;key;0", "done", "wait;line;1", "done"];
+  if (JSON.stringify(signals) !== JSON.stringify(want) || !r.stdout.includes("got=xy3")) {
+    fail(`question signals: got ${JSON.stringify(signals)} and ${JSON.stringify(r.stdout.replace(/\x1b|\x07|\r/g, "").trim())}, expected ${JSON.stringify(want)} and got=xy3`);
+  }
+}
+
+// lib/installers/xrdp.sh does not restart (update) or stop (uninstall) xrdp
+// while an RDP session is open; the app used to hold those back itself. The
+// session is a copy of sleep named as one, so only /proc/<pid>/comm is faked.
+function checkXrdp(work) {
+  const xrdp = join(work, "lib", "installers", "xrdp.sh");
+  const run = (fn) =>
+    bash(
+      `source "$1"; DISTRO_FAMILY=fedora PKG_MGR=dnf
+       run_as_root() { echo "RAN: $*"; }; run_as_root_sh() { echo "RAN: $*"; }
+       info() { :; }; warn() { echo "WARN: $*"; }; error() { echo "ERROR: $*"; }
+       ${fn}; echo "rc=$?"`,
+      [xrdp],
+    ).stdout;
+  const session = join(work, "xrdp-sesexec");
+  copyFileSync(spawnSync("bash", ["-c", "command -v sleep"], { encoding: "utf8" }).stdout.trim(), session);
+  const sleeper = spawn(session, ["30"], { stdio: "ignore" });
+  try {
+    spawnSync("sleep", ["0.3"]);
+    const update = run("update_xrdp");
+    if (!update.includes("RAN: dnf upgrade -y xrdp") || /RAN: systemctl (restart|stop)/.test(update) || !update.includes("rc=0")) {
+      fail(`xrdp: update with an RDP session open must upgrade without restarting xrdp, got ${JSON.stringify(update.trim())}`);
+    }
+    const uninstall = run("uninstall_xrdp");
+    if (uninstall.includes("RAN:") || uninstall.includes("rc=0")) {
+      fail(`xrdp: uninstall with an RDP session open must change nothing and fail, got ${JSON.stringify(uninstall.trim())}`);
+    }
+  } finally {
+    sleeper.kill("SIGKILL");
+  }
 }
 
 if (failures.length) {
