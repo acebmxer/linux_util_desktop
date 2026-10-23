@@ -11,6 +11,14 @@ release is cut.
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundles linux_util v1.11.0** (was v1.10.0), which adds Xodus Nexus. Its
+  Enable RDP → xrdp no longer restarts xrdp while anyone is connected over
+  RDP, refuses to uninstall it then, and stops with an error on KDE when the
+  Plasma X11 session can't be installed. System Updates with nothing to update
+  now ends with its own "No changes: System Updates" line.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
