@@ -1,12 +1,20 @@
 # Linux_Util Desktop
 
+[![CI](https://github.com/acebmxer/linux_util_desktop/actions/workflows/build.yml/badge.svg)](https://github.com/acebmxer/linux_util_desktop/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/github/v/tag/acebmxer/linux_util_desktop?label=version&sort=semver&color=brightgreen)](https://github.com/acebmxer/linux_util_desktop/tags)
 [![Last commit](https://img.shields.io/github/last-commit/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/commits)
 [![Issues](https://img.shields.io/github/issues/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/issues)
 [![Stars](https://img.shields.io/github/stars/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/stargazers)
 [![Forks](https://img.shields.io/github/forks/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/forks)
+[![Unique cloners](https://img.shields.io/badge/unique%20cloners-188-brightgreen)](https://github.com/acebmxer/linux_util_desktop/graphs/traffic)
+[![Tauri](https://img.shields.io/badge/tauri-2-24C8DB?logo=tauri&logoColor=white)](src-tauri/Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-2021-DEA584?logo=rust&logoColor=white)](src-tauri/Cargo.toml)
+[![TypeScript](https://img.shields.io/badge/typescript-5-3178C6?logo=typescript&logoColor=white)](package.json)
 [![Platform: Linux](https://img.shields.io/badge/platform-linux-333333?logo=linux&logoColor=white)](https://github.com/acebmxer/linux_util)
+[![Tests](https://img.shields.io/badge/tests-47%20unit-informational)](https://github.com/acebmxer/linux_util_desktop/actions/workflows/build.yml)
+[![Distros tested](https://img.shields.io/badge/distros%20tested-4-informational)](#packaging)
+[![Clippy](https://img.shields.io/badge/clippy-clean-brightgreen)](https://github.com/acebmxer/linux_util_desktop/actions/workflows/build.yml)
 
 A desktop app for [linux_util](https://github.com/acebmxer/linux_util). Pick
 utilities from a list, click install, uninstall or update, and watch the
@@ -205,6 +213,13 @@ linux_util's. Each release records which linux_util version it bundles in
 - Repo, directory, binary: `linux_util_desktop`
 - Everywhere users see it (window title, docs, releases, desktop entry):
   **Linux_Util Desktop**
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Open issues with the **Bug report** or
+**Feature request** template, and report security problems privately as
+[SECURITY.md](SECURITY.md) describes. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
