@@ -25,6 +25,8 @@ let loaded = false;
 let selected = ALL;
 let selectedSub: string | null = null;
 let query = "";
+// The category, subcategory and search the utilities list last showed.
+let listView = "";
 export const picked = new Set<string>();
 let running = false;
 // True while the run in the panel is an update of the app itself.
@@ -250,6 +252,14 @@ function renderList() {
   const list = $("list");
   const hadFocus = list.contains(document.activeElement);
   list.replaceChildren(...items);
+  // A new category or search starts at the top. Kept, the old scroll offset
+  // can leave a short list out of view, and WebKitGTK on native Wayland then
+  // shows a blank pane until something else scrolls (#18).
+  const view = JSON.stringify([selected, selectedSub, query]);
+  if (view !== listView) {
+    listView = view;
+    list.scrollTop = 0;
+  }
   const boxes = listBoxes();
   const current = boxes.find((b) => b.tabIndex === 0) ?? boxes[0];
   if (current) {

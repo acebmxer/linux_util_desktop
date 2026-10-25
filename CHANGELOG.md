@@ -24,6 +24,14 @@ release is cut.
   Plasma X11 session can't be installed. System Updates with nothing to update
   now ends with its own "No changes: System Updates" line.
 
+### Fixed
+
+- **Switching to a short category no longer shows an empty utilities list**
+  (#18). After scrolling down a long category, picking one with only a few
+  items (Web Browser Tweaks, File Transfer) left the list blank until you
+  scrolled again. The list now starts at the top whenever the category,
+  subcategory or search changes.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
