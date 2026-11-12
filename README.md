@@ -7,7 +7,7 @@
 [![Issues](https://img.shields.io/github/issues/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/issues)
 [![Stars](https://img.shields.io/github/stars/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/stargazers)
 [![Forks](https://img.shields.io/github/forks/acebmxer/linux_util_desktop)](https://github.com/acebmxer/linux_util_desktop/forks)
-[![Unique cloners](https://img.shields.io/badge/unique%20cloners-188-brightgreen)](https://github.com/acebmxer/linux_util_desktop/graphs/traffic)
+[![Unique cloners](https://img.shields.io/badge/unique%20cloners-205-brightgreen)](https://github.com/acebmxer/linux_util_desktop/graphs/traffic)
 [![Tauri](https://img.shields.io/badge/tauri-2-24C8DB?logo=tauri&logoColor=white)](src-tauri/Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-2021-DEA584?logo=rust&logoColor=white)](src-tauri/Cargo.toml)
 [![TypeScript](https://img.shields.io/badge/typescript-5-3178C6?logo=typescript&logoColor=white)](package.json)
