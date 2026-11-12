@@ -11,6 +11,33 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-12
+
+### Changed
+
+- **The run panel now relies on linux_util's own signals** instead of reading
+  its output text: linux_util says when a question is waiting, exits 3 when
+  there was nothing to change, and leaves xrdp running while anyone is
+  connected over RDP. The app's own versions of these are gone, apart from the
+  question signals for a run that could not get a terminal.
+- **Bundles linux_util v1.11.2** (was v1.10.0), which adds Xodus Nexus. Its
+  Enable RDP → xrdp no longer restarts xrdp while anyone is connected over
+  RDP, refuses to uninstall it then, and stops with an error on KDE when the
+  Plasma X11 session can't be installed. On KDE Plasma 6.8 and newer, Enable
+  RDP recommends krdp, and xrdp stops before installing anything with an error
+  saying to use krdp instead. Enable RDP's Uninstall can switch between xrdp
+  and krdp. Under WSL 2, every run that changed something offers to restart WSL
+  at the end, so the Windows Start menu shows the changes. System Updates with
+  nothing to update now ends with its own "No changes: System Updates" line.
+
+### Fixed
+
+- **Switching to a short category no longer shows an empty utilities list**
+  (#18). After scrolling down a long category, picking one with only a few
+  items (Web Browser Tweaks, File Transfer) left the list blank until you
+  scrolled again. The list now starts at the top whenever the category,
+  subcategory or search changes.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added

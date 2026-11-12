@@ -3,29 +3,14 @@
 
 use super::*;
 
-/// The `sudo` the script runs. Restarting or stopping xrdp ends every open RDP
-/// session, and this app (and the run) may be inside one, so while someone is
-/// connected that one command is skipped with a notice. Everything else goes
-/// to the real sudo unchanged.
+/// The `sudo` the script runs: the real sudo with `-A`, so the password comes
+/// from the app's dialog. linux_util itself skips restarting xrdp while RDP
+/// sessions are open (docs/CONTRACT.md), so nothing is held back here.
 pub(super) const SUDO_SHIM: &str = r#"#!/bin/sh
-if [ "$1" = systemctl ]; then
-    case "$2" in
-        restart|stop|try-restart|reload-or-restart|try-reload-or-restart)
-            for unit in "$@"; do
-                case "$unit" in
-                    xrdp|xrdp.service|xrdp-sesman|xrdp-sesman.service)
-                        if grep -lqx xrdp-sesexec /proc/[0-9]*/comm 2>/dev/null; then
-                            echo "[WARN] Skipped 'systemctl $2 $unit': RDP sessions are open and would be ended. Restart it later, after logging out." >&2
-                            exit 0
-                        fi
-                        ;;
-                esac
-            done
-            ;;
-    esac
-fi
-# sudo drops BASH_ENV, so a script run as `sudo bash <script>` (the guest tools
-# ISO's installer) would lose the app's `read`; load it inside root's bash.
+# sudo drops exported functions, so a script run as `sudo bash <script>` (the
+# guest tools ISO's installer) would lose its `read` wrapper; load the app's
+# inside root's bash. linux_util's own `sudo bash` handling loads its wrapper
+# after this one, which then replaces it.
 if [ "$1" = bash ]; then
     shift
     exec {REAL_SUDO} -A bash -c '. {PRELUDE}; export -f read; exec bash "$@"' bash "$@"
@@ -33,10 +18,12 @@ fi
 exec {REAL_SUDO} -A "$@"
 "#;
 
-/// Sourced by every bash the script starts (`BASH_ENV`). It changes nothing
-/// about what `read` does; it only lets the app follow it.
+/// The app's own `read` wrapper. It changes nothing about what `read` does; it
+/// only lets the app follow it. On a terminal, linux_util sends the same
+/// signals itself (`LINUX_UTIL_GUI=1`), so this is loaded through `BASH_ENV`
+/// only for a run without a terminal, and by `SUDO_SHIM` for `sudo bash`.
 ///
-/// On the app's terminal it tells the run panel that a question is waiting and
+/// On a terminal it tells the run panel that a question is waiting and
 /// how it is answered, with a private escape sequence the app strips from the
 /// output: `ESC ] 7701 ; wait ; line|key ; 0|1 BEL` before the read (key when
 /// `-n`/`-N` read a fixed number of keys, 1 when `-s` hides the input) and

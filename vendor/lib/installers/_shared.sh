@@ -47,6 +47,13 @@ _repair_gate() {
     return 1
 }
 
+# WSL 2 kernels carry a "-microsoft-standard-WSL2" release suffix. /proc/version
+# is read rather than $WSL_DISTRO_NAME, which sudo strips from the environment.
+# Usage: _is_wsl2 [version_file]   (defaults to /proc/version)
+_is_wsl2() {
+    grep -q 'WSL2' "${1:-/proc/version}" 2>/dev/null
+}
+
 # True only when the system has actually flagged that a reboot is required.
 # Repair-style tasks (repo/package fixes) use this so the orchestrator's reboot
 # prompt is offered only when a real restart is pending — e.g. a kernel pulled in
@@ -256,4 +263,152 @@ _parse_multi_selection() {
     (( ${#indices[@]} == 0 )) && return 1
     # Deduplicate while preserving the user's input order
     printf '%s\n' "${indices[@]}" | awk '!seen[$0]++'
+}
+
+# Install FUSE 2, which the runtime of a type-2 AppImage needs to mount itself.
+# The package name differs by distro family. Shared by every installer that
+# puts an AppImage on the system (Joplin, Xodus Nexus); do not add a copy.
+ensure_appimage_fuse() {
+    case "$DISTRO_FAMILY" in
+        arch)
+            if ! pkg_check_installed fuse2; then
+                info "Installing fuse2 (required for AppImage support)..."
+                pkg_install fuse2
+            fi
+            ;;
+        debian)
+            # Ubuntu 22.04 uses libfuse2; Ubuntu 24.04+ renamed it libfuse2t64
+            local fuse2_pkg="libfuse2"
+            if [[ "$DISTRO_ID" == "ubuntu" ]] && [[ "${DISTRO_VERSION_ID%%.*}" -ge 24 ]]; then
+                fuse2_pkg="libfuse2t64"
+            fi
+            if ! pkg_check_installed "$fuse2_pkg"; then
+                info "Installing ${fuse2_pkg} (required for AppImage support)..."
+                pkg_install "$fuse2_pkg"
+            fi
+            ;;
+        fedora|rhel)
+            # `fuse` only ships the fusermount utilities and does NOT depend on
+            # `fuse-libs`, which provides libfuse.so.2 — the AppImage runtime
+            # needs both, so check and install each individually.
+            local fuse_pkg
+            for fuse_pkg in fuse fuse-libs; do
+                if ! pkg_check_installed "$fuse_pkg"; then
+                    info "Installing ${fuse_pkg} (required for AppImage support)..."
+                    pkg_install "$fuse_pkg"
+                fi
+            done
+            ;;
+        suse)
+            # Same split as Fedora: `fuse` has the utilities, `libfuse2` the library.
+            local fuse_pkg
+            for fuse_pkg in fuse libfuse2; do
+                if ! pkg_check_installed "$fuse_pkg"; then
+                    info "Installing ${fuse_pkg} (required for AppImage support)..."
+                    pkg_install "$fuse_pkg"
+                fi
+            done
+            ;;
+    esac
+}
+
+# Enable the CRB repository on a RHEL clone (named powertools on EL 8). The crb
+# helper ships with epel-release; config-manager is the fallback without it.
+# Shared by KDE Plasma and ensure_rpmfusion; do not add a copy.
+enable_crb() {
+    run_as_root crb enable &>/dev/null || \
+        run_as_root "$PKG_MGR" config-manager --set-enabled crb &>/dev/null || true
+}
+
+# Whether RPM Fusion's release package for the given section ($1: free or
+# nonfree, default free) is installed.
+rpmfusion_enabled() {
+    rpm -q "rpmfusion-${1:-free}-release" &>/dev/null
+}
+
+# Enable RPM Fusion on Fedora or a RHEL clone, if it is not already enabled.
+# $1 is free (the default) or nonfree; nonfree also enables free. On RHEL
+# clones RPM Fusion depends on EPEL and the CRB repository, so both are enabled
+# first. The release package is named by the major version (rpm -E), never the
+# point release in os-release (9.8), which RPM Fusion does not publish (#86).
+# Every installer that needs RPM Fusion calls this; do not add a copy.
+ensure_rpmfusion() {
+    local want="${1:-free}" os ver section
+    local -a urls=()
+    case "$DISTRO_FAMILY" in
+        fedora) os=fedora; ver=$(rpm -E %fedora) ;;
+        rhel)   os=el;     ver=$(rpm -E %rhel) ;;
+        *)      error "RPM Fusion is only available on Fedora and RHEL-family systems."; return 1 ;;
+    esac
+
+    local -a sections=(free)
+    [[ "$want" == "nonfree" ]] && sections+=(nonfree)
+    for section in "${sections[@]}"; do
+        rpmfusion_enabled "$section" || \
+            urls+=("https://mirrors.rpmfusion.org/${section}/${os}/rpmfusion-${section}-release-${ver}.noarch.rpm")
+    done
+    (( ${#urls[@]} )) || return 0
+
+    if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+        rpm -q epel-release &>/dev/null || pkg_install epel-release || {
+            error "Failed to enable EPEL, which RPM Fusion needs on ${DISTRO_NAME}."
+            return 1
+        }
+        enable_crb
+    fi
+
+    info "Enabling RPM Fusion (${sections[*]})..."
+    pkg_install "${urls[@]}" || { error "Failed to enable RPM Fusion."; return 1; }
+    run_as_root "$PKG_MGR" makecache &>/dev/null || true
+}
+
+# Debian 13 and Ubuntu 24.04+ renamed several libraries for the 64-bit time_t
+# transition (libasound2 -> libasound2t64). apt picks the new name by itself
+# for some of them but not for libasound2, which has two providers on Ubuntu.
+_electron_debian_name() {
+    if apt-cache show "${1}t64" &>/dev/null; then echo "${1}t64"; else echo "$1"; fi
+}
+
+# Runtime libraries for the Electron inside an AppImage (Xodus Nexus, LM Studio;
+# do not add a copy). $1 is the app name used in messages. An AppImage is not
+# a package, so nothing else pulls them in. Most are present on any desktop
+# install; this matters on minimal ones. Taken from the libraries the bundled
+# binary links (ldd), named per family the same way as NVIDIA PAIR's list.
+ensure_electron_runtime_deps() {
+    local app="$1"
+    local -a deps=()
+    case "$DISTRO_FAMILY" in
+        debian)
+            deps=("$(_electron_debian_name libgtk-3-0)" libnss3 libxtst6 libxss1
+                  "$(_electron_debian_name libasound2)" libgbm1 libsecret-1-0 xdg-utils)
+            ;;
+        fedora|rhel)
+            deps=(gtk3 nss libXScrnSaver libXtst xdg-utils libsecret mesa-libgbm alsa-lib)
+            ;;
+        suse)
+            deps=(gtk3 mozilla-nss libXss1 libXtst6 xdg-utils libsecret-1-0 libgbm1 libasound2)
+            ;;
+        arch)
+            deps=(gtk3 nss libxss libxtst xdg-utils libsecret mesa alsa-lib)
+            ;;
+    esac
+    (( ${#deps[@]} == 0 )) && return 0
+
+    local dep
+    local -a missing=()
+    for dep in "${deps[@]}"; do
+        pkg_check_installed "$dep" || missing+=("$dep")
+    done
+    (( ${#missing[@]} == 0 )) && return 0
+
+    # One transaction; if it fails a single wrong name is the likely cause, so
+    # retry individually rather than lose the rest.
+    if ! pkg_install "${missing[@]}"; then
+        for dep in "${missing[@]}"; do
+            pkg_check_installed "$dep" && continue
+            pkg_install "$dep" || \
+                verbose "${app}: runtime dependency '${dep}' unavailable; continuing."
+        done
+    fi
+    return 0
 }

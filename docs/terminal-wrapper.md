@@ -92,7 +92,8 @@ wrong place, and why `chsh`'s prompt never shows.
   would open a pager on a terminal prints and carries on.
 - "Copy log" copies exactly what is on screen.
 - The "No package changes were made." check for System Updates moves to the
-  single stream.
+  single stream. (Since removed: linux_util v1.11.0 exits 3 itself, see
+  `docs/CONTRACT.md`.)
 - **Colours:** the app stops passing `--no-color` and shows linux_util's own
   colours, as Konsole does (the standard 16 colours plus bold and dim, in
   shades readable on both themes). This replaces the app's red for stderr,
@@ -104,7 +105,9 @@ wrong place, and why `chsh`'s prompt never shows.
   `BASH_ENV`) tells the app when a `read` starts and ends, and what kind it is:
   a line, N keys (`-n N`), or hidden (`-s`). It sends this as a private
   terminal code that the app strips from the output. linux_util's scripts are
-  unchanged.
+  unchanged. (Since linux_util v1.11.0 it sends the same code itself with
+  `LINUX_UTIL_GUI=1`, and the app loads its wrapper only for a run without a
+  terminal; see `docs/CONTRACT.md`.)
 - The answer box appears only while a question is waiting and disappears when
   it has been answered. Prompts that come from other programs, such as `chsh`
   or a package manager's own `[y/N]`, are caught another way: output that

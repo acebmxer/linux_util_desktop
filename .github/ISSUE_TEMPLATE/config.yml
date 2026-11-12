@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: New utility or installer problem
+    url: https://github.com/acebmxer/linux_util/issues
+    about: The app runs linux_util for every install. New utilities, and installers that also fail in linux_util.sh on its own, belong there.
+  - name: Security vulnerability
+    url: https://github.com/acebmxer/linux_util_desktop/security
+    about: Report privately through the Security tab, not as a public issue.
