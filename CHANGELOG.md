@@ -20,7 +20,10 @@ release is cut.
   there was nothing to change, and leaves xrdp running while anyone is
   connected over RDP. The app's own versions of these are gone, apart from the
   question signals for a run that could not get a terminal.
-- **Bundles linux_util v1.11.2** (was v1.10.0), which adds Xodus Nexus. Its
+- **Bundles linux_util v1.12.0** (was v1.10.0), which adds Multimedia Codecs,
+  bat, ripgrep, GPU Task Manager, LM Studio, Codex, Hermes Agent and Xodus
+  Nexus. NVIDIA Drivers on Rocky Linux and other RHEL clones can enable RPM
+  Fusion again. Its
   Enable RDP → xrdp no longer restarts xrdp while anyone is connected over
   RDP, refuses to uninstall it then, and stops with an error on KDE when the
   Plasma X11 session can't be installed. On KDE Plasma 6.8 and newer, Enable
