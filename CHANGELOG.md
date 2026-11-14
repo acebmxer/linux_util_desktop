@@ -11,6 +11,19 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-14
+
+### Changed
+
+- **Bundles linux_util v1.13.0** (was v1.12.0), which adds Alpine Linux and
+  postmarketOS support (`apk`, with System Updates, Full System Upgrade, Fix
+  Broken Packages, the mount tasks and about 70 utilities) and about 70 new
+  installers across Productivity, System Tools, Development, Internet, Gaming
+  and Backup, such as 1Password, KeePassXC, htop, Vim, Zed, Opera, Prism
+  Launcher and restic. ArtCraft Launcher is now listed directly under
+  Productivity, without the separate Craft app entries. XEN Guest Utilities on
+  Alpine installs from the release's own repository and uses OpenRC.
+
 ## [0.3.1] - 2026-11-12
 
 ### Changed
@@ -20,7 +33,10 @@ release is cut.
   there was nothing to change, and leaves xrdp running while anyone is
   connected over RDP. The app's own versions of these are gone, apart from the
   question signals for a run that could not get a terminal.
-- **Bundles linux_util v1.11.2** (was v1.10.0), which adds Xodus Nexus. Its
+- **Bundles linux_util v1.12.0** (was v1.10.0), which adds Multimedia Codecs,
+  bat, ripgrep, GPU Task Manager, LM Studio, Codex, Hermes Agent and Xodus
+  Nexus. NVIDIA Drivers on Rocky Linux and other RHEL clones can enable RPM
+  Fusion again. Its
   Enable RDP → xrdp no longer restarts xrdp while anyone is connected over
   RDP, refuses to uninstall it then, and stops with an error on KDE when the
   Plasma X11 session can't be installed. On KDE Plasma 6.8 and newer, Enable
