@@ -11,6 +11,19 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-14
+
+### Changed
+
+- **Bundles linux_util v1.13.0** (was v1.12.0), which adds Alpine Linux and
+  postmarketOS support (`apk`, with System Updates, Full System Upgrade, Fix
+  Broken Packages, the mount tasks and about 70 utilities) and about 70 new
+  installers across Productivity, System Tools, Development, Internet, Gaming
+  and Backup, such as 1Password, KeePassXC, htop, Vim, Zed, Opera, Prism
+  Launcher and restic. ArtCraft Launcher is now listed directly under
+  Productivity, without the separate Craft app entries. XEN Guest Utilities on
+  Alpine installs from the release's own repository and uses OpenRC.
+
 ## [0.3.1] - 2026-11-12
 
 ### Changed

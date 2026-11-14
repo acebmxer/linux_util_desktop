@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "linux_util_desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "glib",
  "libc",
