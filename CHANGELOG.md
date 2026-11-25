@@ -11,6 +11,16 @@ release is cut.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-25
+
+### Changed
+
+- **Bundles linux_util v1.13.1** (was v1.13.0), which adds Unattended Upgrades
+  on Fedora and RHEL-based systems (dnf's automatic updates, with a daily
+  timer and no automatic reboot) and krdpc, a KDE remote desktop client, under
+  Remote Admin Tools. Neither Unattended Upgrades task asks to reboot
+  afterwards any more, on Debian and Ubuntu too.
+
 ## [0.3.2] - 2026-11-14
 
 ### Changed
