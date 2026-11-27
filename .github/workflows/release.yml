@@ -195,7 +195,7 @@ jobs:
         run: |
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="v$version"
-          title="Linux_Util Desktop $tag (stable)"
+          title="$tag"
           flags=(--draft)
           notes="Stable release. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
