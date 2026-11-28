@@ -93,6 +93,27 @@ struct Inner {
     stdin_is_pty: bool,
 }
 
+// `cancel` and `started` are each called with the lock held, so for a script
+// that is starting just as Cancel is pressed, exactly one of them stops it
+// (issue #41).
+impl Inner {
+    /// Cancel was pressed: returns the running script's pid to stop, if any.
+    fn cancel(&mut self) -> Option<u32> {
+        self.cancelled = true;
+        if let Some(tx) = self.reply.take() {
+            let _ = tx.send(None);
+        }
+        self.pid
+    }
+
+    /// Script `pid` has just started: true when Cancel was pressed meanwhile,
+    /// so it must be stopped at once.
+    fn started(&mut self, pid: u32) -> bool {
+        self.pid = Some(pid);
+        self.cancelled
+    }
+}
+
 /// A line from the app itself rather than the script, such as an update's
 /// progress or a failure to start.
 #[derive(Serialize, Clone)]
@@ -238,6 +259,9 @@ pub(crate) fn is_cancelled(app: &AppHandle) -> bool {
 pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -> Command) {
     let state = app.state::<RunState>();
     let (mut ok, mut failed) = (0, 0);
+    // Whether Cancel stopped or skipped any item. A Cancel that came after the
+    // last script had already ended changed nothing.
+    let mut any_cancelled = false;
 
     let real_sudo = find_in_path("sudo");
     let setup =
@@ -271,6 +295,7 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
 
     for (index, name) in names.iter().enumerate() {
         if lock(&state.inner).cancelled {
+            any_cancelled = true;
             let _ = app.emit("run-item", ItemEvent { index, name, state: "cancelled", code: None });
             continue;
         }
@@ -284,31 +309,11 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             .env("PAGER", "cat")
             .env("SYSTEMD_PAGER", "cat")
             .env("GIT_PAGER", "cat");
-        let slaves = pty.as_ref().and_then(|p| Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?]));
-        let on_pty = slaves.is_some();
-        cmd.envs(question_env(&work.prelude_path(), on_pty));
-        match slaves {
-            Some([stdin, stdout, stderr]) => {
-                cmd.env("TERM", "xterm-256color").stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
-                // New session whose controlling terminal is the pty (fd 0, set
-                // up before this runs); its process group is then the child's pid.
-                unsafe {
-                    cmd.pre_exec(|| {
-                        if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-            }
-            None => {
-                cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
-            }
-        }
-        let mut child = match cmd.spawn() {
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        let (mut child, on_pty) = match start(cmd, pty.as_ref(), &work.prelude_path()) {
             Ok(c) => c,
             Err(e) => {
-                let msg = format!("Could not start {}: {e}", cmd.get_program().to_string_lossy());
+                let msg = format!("Could not start {program}: {e}");
                 let _ = app.emit("run-output", Output { text: &msg, error: true });
                 let _ = app.emit("run-item", ItemEvent { index, name, state: "failed", code: None });
                 failed += 1;
@@ -316,9 +321,9 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
             }
         };
         let pty = pty.filter(|_| on_pty);
-        {
+        let cancelled_while_starting = {
             let mut inner = lock(&state.inner);
-            inner.pid = Some(child.id());
+            let cancelled = inner.started(child.id());
             inner.stdin_is_pty = pty.is_some();
             inner.stdin = match &pty {
                 Some(p) => p.master.try_clone().ok(),
@@ -328,6 +333,10 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
                 // No pty: the pipe's write end, wrapped as a File.
                 child.stdin.take().map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
             });
+            cancelled
+        };
+        if cancelled_while_starting {
+            stop_process(child.id());
         }
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let detached = Arc::new(AtomicBool::new(false));
@@ -353,21 +362,25 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         drop(done_tx);
         watch_prompt(app.clone(), prompt, master_for_mode, finished.clone());
         let status = child.wait();
-        // Closing it lets a child left reading stdin see EOF.
-        lock(&state.inner).stdin = None;
+        // The script has ended, and its result is settled now: a Cancel from
+        // here on only skips the items after it (issue #30). The pid is gone,
+        // so a reused pid is never signalled.
+        let cancelled = {
+            let mut inner = lock(&state.inner);
+            inner.pid = None;
+            // Closing it lets a child left reading stdin see EOF.
+            inner.stdin = None;
+            inner.cancelled
+        };
         // Readers still going after this belong to a background process the
         // script left behind; they carry on, detached, until it closes them.
         wait_for_readers(&done_rx, OUTPUT_GRACE);
         detached.store(true, Ordering::SeqCst);
         finished.store(true, Ordering::SeqCst);
-        let cancelled = {
-            let mut inner = lock(&state.inner);
-            inner.pid = None;
-            inner.cancelled
-        };
         // linux_util exits 3 for "ran fine, nothing to change" (docs/CONTRACT.md).
         let code = status.as_ref().ok().and_then(|s| s.code());
         let item_state = if cancelled {
+            any_cancelled = true;
             "cancelled"
         } else if matches!(code, Some(0 | 3)) {
             ok += 1;
@@ -384,8 +397,42 @@ pub(crate) fn run_queue(app: &AppHandle, names: &[String], make: &dyn Fn(&str) -
         let _ = server.join();
     }
     lock(&state.session).idle_since = Some(Instant::now());
-    let cancelled = lock(&state.inner).cancelled;
-    let _ = app.emit("run-done", Done { ok, failed, cancelled });
+    let _ = app.emit("run-done", Done { ok, failed, cancelled: any_cancelled });
+}
+
+/// Starts `cmd` on `pty`'s terminal (stdin, stdout, stderr and controlling
+/// terminal, in a session of its own), or on pipes in a process group of its
+/// own when there is no pty or its terminal cannot be copied. Either way the
+/// process group is the child's pid. Says whether it got the terminal.
+///
+/// `cmd` is dropped here: it holds copies of the terminal it was given, and
+/// while any copy is open, reading the other end never ends, so every item
+/// would wait out `OUTPUT_GRACE` (issue #30).
+fn start(mut cmd: Command, pty: Option<&Pty>, prelude: &Path) -> std::io::Result<(std::process::Child, bool)> {
+    let slaves = pty.and_then(|p| Some([p.slave.try_clone().ok()?, p.slave.try_clone().ok()?, p.slave.try_clone().ok()?]));
+    let on_pty = slaves.is_some();
+    cmd.envs(question_env(prelude, on_pty));
+    match slaves {
+        Some([stdin, stdout, stderr]) => {
+            cmd.env("TERM", "xterm-256color").stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+            // New session whose controlling terminal is the pty (fd 0, set
+            // up before this runs); its process group is then the child's pid.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        None => {
+            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+        }
+    }
+    let child = cmd.spawn()?;
+    drop(cmd);
+    Ok((child, on_pty))
 }
 
 /// The environment that lets the run panel see a question waiting.
@@ -546,13 +593,16 @@ pub fn cancel_run(state: State<'_, RunState>) {
         if !inner.running {
             return;
         }
-        inner.cancelled = true;
-        if let Some(tx) = inner.reply.take() {
-            let _ = tx.send(None);
-        }
-        inner.pid
+        inner.cancel()
     };
-    let Some(pid) = pid else { return };
+    if let Some(pid) = pid {
+        stop_process(pid);
+    }
+}
+
+/// Terminates the script `pid` (the leader of its own process group) and
+/// everything it started: SIGTERM, then SIGKILL after 5 s.
+fn stop_process(pid: u32) {
     let group = -(pid as i32);
     // Commands the script runs under `timeout` (the package cache refresh) sit
     // in a process group of their own, so the group signal alone never reaches
@@ -909,6 +959,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "REAL: -A systemctl restart xrdp\n");
         assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A script that leaves nothing behind ends its item as soon as it exits:
+    /// the app holds no copy of its terminal, so reading the output ends at
+    /// once instead of after `OUTPUT_GRACE` (issue #30).
+    #[test]
+    fn script_on_a_pty_ends_without_waiting_out_the_grace() {
+        let pty = Pty::open().unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "echo hello"]);
+        let (mut child, on_pty) = start(cmd, Some(&pty), Path::new("/nonexistent")).unwrap();
+        assert!(on_pty);
+        let Pty { mut master, slave } = pty;
+        drop(slave);
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _done = done_tx;
+            let mut buf = [0u8; 64];
+            while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        assert!(child.wait().unwrap().success());
+        let started = Instant::now();
+        assert!(wait_for_readers(&done_rx, OUTPUT_GRACE), "the output was still held open after {OUTPUT_GRACE:?}");
+        assert!(started.elapsed() < Duration::from_millis(500), "waited {:?}", started.elapsed());
+    }
+
+    /// Cancel pressed while a script is starting, before its pid is known,
+    /// still stops that script as soon as it has started (issue #41).
+    #[test]
+    fn cancel_pressed_while_a_script_starts_stops_it() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut inner = Inner { running: true, ..Inner::default() };
+        assert_eq!(inner.cancel(), None, "no script to stop yet");
+        let pty = Pty::open().unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "sleep 5; echo done"]);
+        let (mut child, _) = start(cmd, Some(&pty), Path::new("/nonexistent")).unwrap();
+        if inner.started(child.id()) {
+            stop_process(child.id());
+        }
+        let started = Instant::now();
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "ran {:?}", started.elapsed());
+    }
+
+    /// Cancel pressed once the script runs gets its pid to stop.
+    #[test]
+    fn cancel_after_start_gets_the_script_to_stop() {
+        let mut inner = Inner { running: true, ..Inner::default() };
+        assert!(!inner.started(4242));
+        assert_eq!(inner.cancel(), Some(4242));
+        assert!(inner.cancelled);
     }
 
     #[test]

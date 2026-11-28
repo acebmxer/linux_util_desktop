@@ -13,6 +13,14 @@ release is cut.
 
 ### Fixed
 
+- **Each item in a run ends as soon as its script does** (#30). Every item
+  waited an extra 2 seconds after its script had finished, so a queue of 10
+  took 20 seconds longer, and pressing Cancel in those 2 seconds marked an item
+  that had already succeeded as cancelled and skipped the reboot offer. A
+  Cancel that comes after a script has finished now only skips the items after
+  it.
+- **Cancel pressed just as an item starts now stops that item** (#41). Before,
+  the item ran to the end and only the items after it were skipped.
 - **An update download that stops receiving data no longer hangs** (#29). If
   the connection stalled partway through (Wi-Fi dropped, the laptop slept),
   the download waited forever, Cancel did nothing, and every later action said
