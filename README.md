@@ -21,9 +21,8 @@ utilities from a list, click install, uninstall or update, and watch the
 output, without opening a terminal.
 
 > **Status: early development.** The app lists every utility with its install
-> status, installs, uninstalls and updates them (one, a selection, or everything
-> installed), selects them from profiles, shows linux_util's logs, and has a
-> Settings window and keyboard shortcuts. Downloads are on the
+> status, installs, uninstalls and updates them (one or a selection), selects
+> them from profiles, shows linux_util's logs, and has a Settings window and keyboard shortcuts. Downloads are on the
 > [Releases](https://github.com/acebmxer/linux_util_desktop/releases) page. See
 > [docs/PLAN.md](docs/PLAN.md) for the staged roadmap and where work currently
 > stands.

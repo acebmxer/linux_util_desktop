@@ -8,10 +8,12 @@ the app is updated.
 
 ## Flags used
 
-`--list --json`, `--install <name>`, `--uninstall <name>`, `--update <name>`,
-`--update-all`, `--check <name>`, `--dry-run`, `--no-color`, `--version`,
-`--export-profile <file>`. `--import-profile` is only checked to exist: the app
-writes files in its format but applies profiles through its own run queue.
+`--list --json --no-color`, `--install <name>`, `--uninstall <name>`,
+`--update <name>` (each with `--dry-run` in front for a dry run), and
+`--no-color --export-profile <file>`. The contract test also runs `--version`,
+which the app does not pass, to check that the script starts and loads the
+config file. `--import-profile` is only checked to exist: the app writes files
+in its format but applies profiles through its own run queue.
 
 ## Config file
 

@@ -16,9 +16,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCHEMA = "linux_util/list/v1";
+// The flags the app passes, `--version` (run below) and `--import-profile`
+// (docs/CONTRACT.md, "Flags used").
 const FLAGS = [
   "--list", "--json", "--install", "--uninstall", "--update",
-  "--update-all", "--check", "--dry-run", "--no-color", "--version",
+  "--dry-run", "--no-color", "--version",
   "--export-profile", "--import-profile",
 ];
 // Keep in step with KEYS in src-tauri/src/settings.rs.

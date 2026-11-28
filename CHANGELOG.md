@@ -13,6 +13,10 @@ release is cut.
 
 ### Fixed
 
+- **The README and `docs/CONTRACT.md` describe what the app does today**
+  (#34). The README no longer says the app can update everything installed in
+  one go (the Update all button was removed), and the contract lists only the
+  linux_util options the app passes.
 - **The reboot offer matches linux_util's menu again** (#32). Applying
   Unattended Upgrades or Configure Unattended Upgrades no longer offers a
   reboot. Under WSL 2, any run that changed something now offers to restart
