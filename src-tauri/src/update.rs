@@ -5,8 +5,8 @@
 //! pre-releases. Installing downloads the
 //! file that matches how the app was installed, checks the release's
 //! `SHA256SUMS` against its signature (`SHA256SUMS.minisig`, made by the
-//! Release workflow with this project's minisign key) and the file against
-//! those sums, and then either hands a `.deb` or `.rpm` to the system package
+//! Release workflow with this project's minisign key, whose signed comment
+//! names the release's tag) and the file against those sums, and then either hands a `.deb` or `.rpm` to the system package
 //! manager through the same password dialog the install actions use, or
 //! replaces the AppImage file in place. Nothing is downloaded without a click,
 //! and no valid signature or checksum means no install.
@@ -33,7 +33,9 @@ const REPO: &str = "acebmxer/linux_util_desktop";
 /// debug builds only; a release build always uses GitHub.
 const RELEASES_URL_ENV: &str = "LU_RELEASES_URL";
 /// With `LU_RELEASES_URL` in a debug build: a minisign public key file to check
-/// the local server's signature with, instead of the project's own key.
+/// the local server's signature with, instead of the project's own key. Its
+/// signatures must name the release as the Release workflow's do
+/// (`minisign -S -t "tag:<tag>"`).
 const RELEASES_KEY_ENV: &str = "LU_RELEASES_KEY";
 const SUMS_NAME: &str = "SHA256SUMS";
 const SIG_NAME: &str = "SHA256SUMS.minisig";
@@ -81,6 +83,8 @@ pub struct Update {
 }
 
 struct Release {
+    /// The release's tag as published, such as `v0.2.1-beta.12`.
+    tag: String,
     version: String,
     /// The tag without its `v`, such as `0.2.1` or `0.2.1-beta.12`.
     label: String,
@@ -99,6 +103,8 @@ enum Method {
 }
 
 struct Plan {
+    /// The tag of the release the files belong to.
+    tag: String,
     method: Method,
     file: (String, String),
     sums: String,
@@ -265,13 +271,15 @@ fn releases_url_from(override_url: Option<String>, debug_build: bool, beta: bool
     }
 }
 
-/// Files may only come from this repo's own releases (unless testing).
-fn download_allowed(url: &str, overridden: bool) -> bool {
-    overridden || url.starts_with(&format!("https://github.com/{REPO}/releases/download/"))
+/// Files may only come from this repo's own release `tag` (unless testing).
+/// A beta and the stable release of one version have files of the same names,
+/// so the tag in the address is what keeps one from passing as the other.
+fn download_allowed(url: &str, tag: &str, overridden: bool) -> bool {
+    overridden || url.starts_with(&format!("https://github.com/{REPO}/releases/download/{tag}/"))
 }
 
 fn release_from(doc: &serde_json::Value, overridden: bool) -> Result<Release, String> {
-    let tag = doc["tag_name"].as_str().ok_or("The release has no tag")?;
+    let tag = doc["tag_name"].as_str().ok_or("The release has no tag")?.trim();
     let rank = parse_release(tag).ok_or_else(|| format!("Cannot read the release version {tag}"))?;
     let ((major, minor, patch), _) = rank;
     let assets = doc["assets"]
@@ -279,13 +287,14 @@ fn release_from(doc: &serde_json::Value, overridden: bool) -> Result<Release, St
         .map(|list| {
             list.iter()
                 .filter_map(|a| Some((a["name"].as_str()?.to_string(), a["browser_download_url"].as_str()?.to_string())))
-                .filter(|(_, url)| download_allowed(url, overridden))
+                .filter(|(_, url)| download_allowed(url, tag, overridden))
                 .collect()
         })
         .unwrap_or_default();
     Ok(Release {
+        tag: tag.to_string(),
         version: format!("{major}.{minor}.{patch}"),
-        label: tag.trim().trim_start_matches('v').to_string(),
+        label: tag.trim_start_matches('v').to_string(),
         rank,
         notes: doc["body"].as_str().unwrap_or("").chars().take(MAX_NOTES).collect(),
         page: doc["html_url"].as_str().unwrap_or("").to_string(),
@@ -304,14 +313,26 @@ fn fetch_release(beta: bool) -> Result<Release, String> {
         .map_err(|e| format!("Could not check for updates: {e}"))?;
     let text = response.body_mut().read_to_string().map_err(|e| format!("Could not read the release information: {e}"))?;
     let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Unexpected release information: {e}"))?;
-    match doc.as_array() {
-        None => release_from(&doc, overridden),
+    let release = match doc.as_array() {
+        None => release_from(&doc, overridden)?,
         Some(list) => list
             .iter()
             .filter(|d| d["draft"].as_bool() != Some(true))
             .filter_map(|d| release_from(d, overridden).ok())
             .max_by_key(|r| r.rank)
-            .ok_or_else(|| "No releases were found".to_string()),
+            .ok_or_else(|| "No releases were found".to_string())?,
+    };
+    stable_channel_check(&release, beta)?;
+    Ok(release)
+}
+
+/// With beta versions off, only a stable release is offered, even if the
+/// reply for the latest release names a beta.
+fn stable_channel_check(release: &Release, beta: bool) -> Result<(), String> {
+    if beta || release.rank.1 == STABLE {
+        Ok(())
+    } else {
+        Err(format!("The latest release is reported as {}, a beta, while beta versions are off. Nothing is offered.", release.label))
     }
 }
 
@@ -339,6 +360,9 @@ fn plan(release: &Release) -> Result<Plan, String> {
         return Err("Releases are built for x86_64 only.".to_string());
     }
     let method = install_method()?;
+    if let Method::AppImage(path) = &method {
+        appimage_folder_writable(path)?;
+    }
     let v = &release.version;
     let name = match &method {
         Method::AppImage(_) => format!("linux_util_desktop_{v}_amd64.AppImage"),
@@ -346,7 +370,23 @@ fn plan(release: &Release) -> Result<Plan, String> {
         Method::Rpm(_) => format!("linux_util_desktop-{v}-1.x86_64.rpm"),
     };
     let (file, sums, sig) = release_files(release, &name)?;
-    Ok(Plan { method, file, sums, sig })
+    Ok(Plan { tag: release.tag.clone(), method, file, sums, sig })
+}
+
+/// The new AppImage is written next to the running one and renamed over it,
+/// so its folder must be one this user can write to (not `/opt`, say).
+fn appimage_folder_writable(appimage: &Path) -> Result<(), String> {
+    let dir = appimage.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let writable = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())
+        .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } == 0);
+    if writable {
+        Ok(())
+    } else {
+        Err(format!(
+            "This AppImage is in {}, which you cannot write to, so it cannot replace itself. Download the new version from the release page.",
+            dir.display()
+        ))
+    }
 }
 
 /// The release's file `name` (name, address) and the addresses of its
@@ -380,13 +420,22 @@ fn signing_key() -> Result<String, String> {
 }
 
 /// Checks that `sig` (the text of a `.minisig` file) is a signature of `sums`
-/// by `key` (the text of a minisign public key file). Only the prehashed
-/// signatures current minisign makes are accepted.
-fn check_signature(key: &str, sums: &[u8], sig: &str) -> Result<(), String> {
+/// by `key` (the text of a minisign public key file), made for release `tag`:
+/// its signed ("trusted") comment must be `tag:<tag>`, as the Release workflow
+/// writes it. Without that, a beta's validly signed files could pass as the
+/// stable release of the same version. Only the prehashed signatures current
+/// minisign makes are accepted.
+fn check_signature(key: &str, sums: &[u8], sig: &str, tag: &str) -> Result<(), String> {
     let key = PublicKey::decode(key).map_err(|e| format!("The release signing key is unreadable: {e}"))?;
     let sig = Signature::decode(sig).map_err(|e| format!("{SIG_NAME} is not a minisign signature: {e}. Nothing was installed."))?;
     key.verify(sums, &sig, false)
-        .map_err(|e| format!("{SUMS_NAME} is not signed with this project's release key ({e}). Nothing was installed."))
+        .map_err(|e| format!("{SUMS_NAME} is not signed with this project's release key ({e}). Nothing was installed."))?;
+    let signed_for = sig.trusted_comment().trim();
+    if signed_for == format!("tag:{tag}") {
+        Ok(())
+    } else {
+        Err(format!("{SUMS_NAME} is not signed for release {tag} (its signature says \"{signed_for}\"). Nothing was installed."))
+    }
 }
 
 fn sha256_of(path: &Path) -> std::io::Result<String> {
@@ -453,8 +502,8 @@ fn fetch_verified(app: &AppHandle, plan: &Plan, dest_dir: &Path, file_name: &str
     };
     let sums = fetch_text(&plan.sums, SUMS_NAME)?;
     let sig = fetch_text(&plan.sig, SIG_NAME)?;
-    check_signature(&signing_key()?, sums.as_bytes(), &sig)?;
-    actions::emit_output(app, &format!("{SUMS_NAME} is signed with this project's release key"), false);
+    check_signature(&signing_key()?, sums.as_bytes(), &sig, &plan.tag)?;
+    actions::emit_output(app, &format!("{SUMS_NAME} is signed with this project's release key for {}", plan.tag), false);
     let expected = expected_hash(&sums, name).ok_or_else(|| format!("{SUMS_NAME} does not list {name}."))?;
     actions::emit_output(app, &format!("Downloading {name}"), false);
     let dest = dest_dir.join(file_name);
@@ -715,10 +764,50 @@ mod tests {
     #[test]
     fn only_this_repos_releases_download() {
         let ok = format!("https://github.com/{REPO}/releases/download/v1.0.0/x.deb");
-        assert!(download_allowed(&ok, false));
-        assert!(!download_allowed("https://github.com/other/repo/releases/download/v1/x.deb", false));
-        assert!(!download_allowed("http://example.com/x.deb", false));
-        assert!(download_allowed("http://127.0.0.1:1/x.deb", true));
+        assert!(download_allowed(&ok, "v1.0.0", false));
+        assert!(!download_allowed("https://github.com/other/repo/releases/download/v1.0.0/x.deb", "v1.0.0", false));
+        assert!(!download_allowed("http://example.com/x.deb", "v1.0.0", false));
+        assert!(download_allowed("http://127.0.0.1:1/x.deb", "v1.0.0", true));
+    }
+
+    /// A reply that points a stable release's files at one of its betas (same
+    /// file names, each validly signed) leaves the stable release with no files
+    /// it can be installed from (issue #40).
+    #[test]
+    fn files_of_another_release_are_not_taken() {
+        let deb = "linux_util_desktop_0.3.1_amd64.deb";
+        let at = |tag: &str, n: &str| serde_json::json!({"name": n, "browser_download_url": format!("https://github.com/{REPO}/releases/download/{tag}/{n}")});
+        let assets = |tag: &str| serde_json::json!([at(tag, deb), at(tag, SUMS_NAME), at(tag, SIG_NAME)]);
+        let real = serde_json::json!({"tag_name": "v0.3.1", "assets": assets("v0.3.1")});
+        assert!(release_files(&release_from(&real, false).unwrap(), deb).is_ok());
+        let swapped = serde_json::json!({"tag_name": "v0.3.1", "assets": assets("v0.3.1-beta.1")});
+        let err = release_files(&release_from(&swapped, false).unwrap(), deb).unwrap_err();
+        assert!(err.contains(deb), "{err}");
+    }
+
+    #[test]
+    fn stable_channel_offers_no_beta() {
+        let release = |tag: &str| release_from(&serde_json::json!({"tag_name": tag}), false).unwrap();
+        assert!(stable_channel_check(&release("v0.3.4"), false).is_ok());
+        assert!(stable_channel_check(&release("v0.3.4-beta.2"), true).is_ok());
+        let err = stable_channel_check(&release("v0.3.4-beta.2"), false).unwrap_err();
+        assert!(err.contains("0.3.4-beta.2"), "{err}");
+    }
+
+    #[test]
+    fn appimage_in_a_folder_the_user_cannot_write_is_not_installable() {
+        let dir = std::env::temp_dir().join(format!("lud-appimage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let appimage = dir.join("linux_util_desktop.AppImage");
+        std::fs::write(&appimage, b"").unwrap();
+        assert_eq!(appimage_folder_writable(&appimage), Ok(()));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = appimage_folder_writable(&appimage);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = result.unwrap_err();
+        assert!(err.contains("cannot write to"), "{err}");
     }
 
     #[test]
@@ -743,19 +832,39 @@ mod tests {
 RUTxwYzDfjdC1ihDjZ4RspJ+UYMRjxUZJuGceLMeRjj3fb2hUDEl1nZZ8C7MTZIG+iqDqWkzCSkJSk5kHJNuHR05XIRJM8G4twY=\n\
 trusted comment: timestamp:1792404970\tfile:SUMS\thashed\n\
 fzp9YfNPf0p6vwOIvK0zXwTKcRAgXx7TSH2DBfRUOO9eQhpM4ah5pauiaFCRI0uJne2peK2dM9PPRPPr+8eqAg==\n";
+    // Made as the Release workflow signs (minisign 0.11, Ubuntu 24.04):
+    // `minisign -G -W`, then `minisign -S -t "tag:v9.9.9"` on TEST_SUMS.
+    const TAG_KEY: &str =
+        "untrusted comment: minisign public key A5E3E8DA127A013A\nRWQ6AXoS2ujjpaWOIbsAg4s8JfF/0nqfcloAWlI+FGAsH3h00byCLxYn\n";
+    const TAG_SIG: &str = "untrusted comment: signature from minisign secret key\n\
+RUQ6AXoS2ujjpVgtOwUoyHNqPMn3bJGWe+pfVVB5j9RM5mUkE8/6I1eTkH8aPD6JOtjShrLHqZcqb7BUBQgYk9oetPUF5j3QsA0=\n\
+trusted comment: tag:v9.9.9\n\
+uS0V7oVjd+6Ux4y09D6Kdj7oQjipl0Ac50lrU/NNlz0w0qzkQUetRNJMGAgmnK7VgxU7vQoiFxrSF618IiwgAg==\n";
 
     #[test]
     fn signed_sums_are_accepted() {
-        assert_eq!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), TEST_SIG), Ok(()));
+        assert_eq!(check_signature(TAG_KEY, TEST_SUMS.as_bytes(), TAG_SIG, "v9.9.9"), Ok(()));
     }
 
     #[test]
     fn changed_sums_wrong_key_or_bad_signature_are_refused() {
         let changed = TEST_SUMS.replacen('a', "b", 1);
-        assert!(check_signature(TEST_KEY, changed.as_bytes(), TEST_SIG).is_err());
-        assert!(check_signature(OTHER_KEY, TEST_SUMS.as_bytes(), TEST_SIG).is_err());
-        assert!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), "").is_err());
-        assert!(check_signature(TEST_KEY, TEST_SUMS.as_bytes(), "not a signature").is_err());
+        assert!(check_signature(TAG_KEY, changed.as_bytes(), TAG_SIG, "v9.9.9").is_err());
+        assert!(check_signature(OTHER_KEY, TEST_SUMS.as_bytes(), TAG_SIG, "v9.9.9").is_err());
+        assert!(check_signature(TEST_KEY, changed.as_bytes(), TEST_SIG, "v9.9.9").is_err());
+        assert!(check_signature(TAG_KEY, TEST_SUMS.as_bytes(), "", "v9.9.9").is_err());
+        assert!(check_signature(TAG_KEY, TEST_SUMS.as_bytes(), "not a signature", "v9.9.9").is_err());
+    }
+
+    /// A valid signature made for another release, or one that names no
+    /// release (minisign's default comment, as releases before this check had),
+    /// is refused (issue #40).
+    #[test]
+    fn signature_for_another_release_is_refused() {
+        let err = check_signature(TAG_KEY, TEST_SUMS.as_bytes(), TAG_SIG, "v9.9.9-beta.1").unwrap_err();
+        assert!(err.contains("not signed for release v9.9.9-beta.1") && err.contains("\"tag:v9.9.9\""), "{err}");
+        let err = check_signature(TEST_KEY, TEST_SUMS.as_bytes(), TEST_SIG, "v9.9.9").unwrap_err();
+        assert!(err.contains("not signed for release v9.9.9"), "{err}");
     }
 
     #[test]

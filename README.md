@@ -89,10 +89,12 @@ version. On launch the app looks at this project's latest stable GitHub release
 betas) and, if it is newer, shows a bar with the release notes and an **Install update**
 button (turn the launch check off in Settings; **Check for updates** checks on
 demand). Nothing is downloaded until you click. The release's `SHA256SUMS` must
-carry this project's signature (`SHA256SUMS.minisig`) and the downloaded file
-must match it; then a `.deb` or `.rpm` is installed
+carry this project's signature (`SHA256SUMS.minisig`), made for that release,
+and the downloaded file must match it; then a `.deb` or `.rpm` is installed
 with apt-get, dnf or zypper through the same password dialog as the other
-actions, or an AppImage file is replaced in place. Restart the app afterwards.
+actions, or an AppImage file is replaced in place (when it is kept in a folder
+you can write to; otherwise the notice shows the release page instead). Restart the
+app afterwards.
 Turning beta versions off goes back to stable releases only; a beta already
 installed stays until a newer stable release comes out.
 A copy that was not installed from a release file (a source checkout) only

@@ -170,11 +170,26 @@ jobs:
           name: release
           path: release
 
+      - name: Release tag
+        id: tag
+        env:
+          BETA_NUMBER: ${{ needs.build.outputs.beta }}
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="v$version"
+          if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+            tag="v$version-beta.$BETA_NUMBER"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       # Signed here, after the smoke tests, so the key is only ever in this job.
-      # The app refuses an update whose SHA256SUMS has no valid signature.
+      # The app refuses an update whose SHA256SUMS has no valid signature, or
+      # whose signed comment does not name the tag it is installing: a beta and
+      # the stable release of one version have files of the same names.
       - name: Sign SHA256SUMS
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if [[ -z "$MINISIGN_SECRET_KEY" ]]; then
             echo "::error::The MINISIGN_SECRET_KEY repo secret is not set; releases must be signed"
@@ -185,22 +200,23 @@ jobs:
           key="$RUNNER_TEMP/minisign.key"
           trap 'rm -f "$key"' EXIT
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
-          minisign -S -s "$key" -m release/SHA256SUMS
-          minisign -V -p src-tauri/minisign.pub -m release/SHA256SUMS
+          minisign -S -s "$key" -m release/SHA256SUMS -t "tag:$TAG"
+          minisign -V -p src-tauri/minisign.pub -m release/SHA256SUMS | tee "$RUNNER_TEMP/verify.txt"
+          if ! grep -qxF "Trusted comment: tag:$TAG" "$RUNNER_TEMP/verify.txt"; then
+            echo "::error::The signature does not name $TAG; the app would refuse this release"
+            exit 1
+          fi
 
       - name: Create or refresh the release
         env:
           GH_TOKEN: ${{ github.token }}
-          BETA_NUMBER: ${{ needs.build.outputs.beta }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          tag="v$version"
+          tag=$TAG
           title="$tag"
           flags=(--draft)
           notes="Stable release. Checksums for every file are in SHA256SUMS, signed in SHA256SUMS.minisig."
           if [[ "$GITHUB_REF_NAME" != "main" ]]; then
-            tag="v$version-beta.$BETA_NUMBER"
-            title="$tag"
             flags=(--prerelease)  # published, not a draft: the app cannot see drafts
             # What is new in this beta is what CHANGELOG.md lists under [Unreleased].
             unreleased=$(awk '/^## \[Unreleased\]/{f=1; next} /^## \[/{f=0} f' CHANGELOG.md)

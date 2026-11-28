@@ -13,6 +13,17 @@ release is cut.
 
 ### Fixed
 
+- **An update is only installed from the files of the release it names**
+  (#40). A beta and the stable release of one version have files with the same
+  names, each validly signed, so a faked reply from GitHub could have handed a
+  stable-channel user a beta. Each file must now come from that release's own
+  download address, the signature must name the release, and with beta
+  versions off a beta is never offered. Releases are now signed that way;
+  ones published before this cannot be installed by this version, which only
+  ever installs newer ones.
+- **An AppImage kept in a folder you cannot write to no longer offers an
+  update it cannot install** (#33). It failed with "Permission denied" after
+  you clicked; the notice now says so up front and shows the release page.
 - **The README and `docs/CONTRACT.md` describe what the app does today**
   (#34). The README no longer says the app can update everything installed in
   one go (the Update all button was removed), and the contract lists only the
