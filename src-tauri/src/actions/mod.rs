@@ -503,9 +503,10 @@ pub fn askpass_reply(state: State<'_, RunState>, password: Option<String>) {
     }
 }
 
-/// True when the system has flagged a pending reboot: the same two checks
-/// linux_util's menu uses before it offers one (the Debian marker file, and
-/// `needs-restarting -r` on Fedora/RHEL).
+/// True when the system has a reboot pending: the checks linux_util's menu
+/// makes before it offers one (`_reboot_required` in
+/// `lib/installers/_shared.sh`): the Debian marker file, `needs-restarting -r`
+/// on Fedora/RHEL, and on Arch, which has neither, the running system itself.
 #[tauri::command]
 pub fn reboot_needed() -> bool {
     if Path::new("/var/run/reboot-required").exists() {
@@ -514,7 +515,71 @@ pub fn reboot_needed() -> bool {
     let mut cmd = Command::new("needs-restarting");
     crate::use_host_env(&mut cmd);
     cmd.arg("-r").stdout(Stdio::null()).stderr(Stdio::null());
-    matches!(cmd.status(), Ok(s) if !s.success())
+    if matches!(cmd.status(), Ok(s) if !s.success()) {
+        return true;
+    }
+    is_arch_family(&crate::os_release().unwrap_or_default())
+        && (running_kernel_replaced(Path::new("/")) || stale_system_files_in_use(Path::new("/proc")))
+}
+
+/// Arch or a distro built on it, by `/etc/os-release`'s `ID` and `ID_LIKE`, as
+/// linux_util's `detect_distro` (`lib/pkg_manager.sh`) names the family.
+fn is_arch_family(os_release: &str) -> bool {
+    let field = |key: &str| {
+        os_release
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .map(|v| v.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    matches!(field("ID").as_str(), "arch" | "manjaro" | "endeavouros" | "garuda" | "artix" | "cachyos") || field("ID_LIKE").contains("arch")
+}
+
+/// pacman deletes the running kernel's module folder when it upgrades the
+/// kernel, so its absence means the running kernel is no longer the installed
+/// one. `root` is `/` except in tests.
+fn running_kernel_replaced(root: &Path) -> bool {
+    let release = std::fs::read_to_string(root.join("proc/sys/kernel/osrelease")).unwrap_or_default();
+    let release = release.trim();
+    let trees = [root.join("usr/lib/modules"), root.join("lib/modules")];
+    !release.is_empty() && trees.iter().any(|t| t.is_dir()) && !trees.iter().any(|t| t.join(release).is_dir())
+}
+
+/// A running process still maps a system library or program that an upgrade
+/// has replaced on disk, so the new one is not in use until a restart. Only
+/// `/usr` files count: a deleted temp file or shared memory is no upgrade.
+/// Reads every `<proc>/<pid>/maps` this user may read, as linux_util does.
+fn stale_system_files_in_use(proc: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else { return false };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())))
+        .filter_map(|e| std::fs::read_to_string(e.path().join("maps")).ok())
+        .any(|maps| maps.lines().any(is_stale_system_mapping))
+}
+
+/// One `/proc/<pid>/maps` line (address, perms, offset, device, inode, path)
+/// for a file under `/usr/lib`, `/usr/lib32`, `/usr/bin` or `/usr/sbin` that
+/// has been deleted.
+fn is_stale_system_mapping(line: &str) -> bool {
+    let mut rest = line;
+    for field in 0..5 {
+        let Some((value, after)) = rest.trim_start_matches(' ').split_once(' ') else { return false };
+        if field == 4 && (value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit())) {
+            return false;
+        }
+        rest = after;
+    }
+    let Some(path) = rest.trim_start_matches(' ').strip_suffix(" (deleted)") else { return false };
+    ["/usr/lib/", "/usr/lib32/", "/usr/bin/", "/usr/sbin/"].iter().any(|dir| path.starts_with(dir))
+}
+
+/// True under WSL 2, where linux_util offers to restart WSL after any run that
+/// changed something (`_is_wsl2` in `lib/installers/_shared.sh`: the kernel
+/// version names WSL2).
+#[tauri::command]
+pub fn is_wsl2() -> bool {
+    std::fs::read_to_string("/proc/version").is_ok_and(|v| v.contains("WSL2"))
 }
 
 /// Runs `systemctl reboot` through `sudo`, feeding it `password` when given and
@@ -1012,6 +1077,58 @@ mod tests {
         assert!(!inner.started(4242));
         assert_eq!(inner.cancel(), Some(4242));
         assert!(inner.cancelled);
+    }
+
+    #[test]
+    fn arch_family_is_read_from_os_release() {
+        assert!(is_arch_family("NAME=\"Arch Linux\"\nID=arch\n"));
+        assert!(is_arch_family("ID=cachyos\nID_LIKE=arch\n"));
+        assert!(is_arch_family("ID=\"steamos\"\nID_LIKE=\"arch\"\n"));
+        assert!(!is_arch_family("ID=fedora\nID_LIKE=\"rhel centos\"\n"));
+        assert!(!is_arch_family("ID=ubuntu\nID_LIKE=debian\n"));
+        assert!(!is_arch_family(""));
+    }
+
+    /// The running kernel counts as replaced only when the module folders
+    /// exist and none has its release.
+    #[test]
+    fn replaced_kernel_is_seen_from_its_missing_modules() {
+        let root = std::env::temp_dir().join(format!("lud-kernel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc/sys/kernel")).unwrap();
+        std::fs::write(root.join("proc/sys/kernel/osrelease"), "6.12.1-arch1-1\n").unwrap();
+        assert!(!running_kernel_replaced(&root), "no module folders at all");
+        std::fs::create_dir_all(root.join("usr/lib/modules/6.12.2-arch1-1")).unwrap();
+        assert!(running_kernel_replaced(&root), "only the new kernel's modules");
+        std::fs::create_dir_all(root.join("usr/lib/modules/6.12.1-arch1-1")).unwrap();
+        assert!(!running_kernel_replaced(&root), "running kernel still installed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn stale_mappings_are_replaced_system_files_only() {
+        let line = |path: &str| format!("7f2a1c000000-7f2a1c021000 r--p 00000000 103:02 1835067                    {path}");
+        assert!(is_stale_system_mapping(&line("/usr/lib/libssl.so.3 (deleted)")));
+        assert!(is_stale_system_mapping(&line("/usr/lib32/libGL.so.1 (deleted)")));
+        assert!(is_stale_system_mapping(&line("/usr/bin/pipewire (deleted)")));
+        assert!(is_stale_system_mapping(&line("/usr/lib/with space/lib.so (deleted)")));
+        assert!(!is_stale_system_mapping(&line("/usr/lib/libssl.so.3")), "not replaced");
+        assert!(!is_stale_system_mapping(&line("/tmp/scratch (deleted)")), "not a system file");
+        assert!(!is_stale_system_mapping(&line("/dev/shm/x (deleted)")));
+        assert!(!is_stale_system_mapping(&line("/usr/share/icons/x.cache (deleted)")), "not lib or bin");
+        assert!(!is_stale_system_mapping("7f2a1c000000-7f2a1c021000 rw-p 00000000 00:00 0 "), "anonymous");
+        assert!(!is_stale_system_mapping("7f2a1c000000-7f2a1c021000 rw-p 00000000 00:00 x /usr/lib/a (deleted)"), "bad inode");
+        let proc = std::env::temp_dir().join(format!("lud-proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proc);
+        std::fs::create_dir_all(proc.join("41")).unwrap();
+        std::fs::create_dir_all(proc.join("self")).unwrap();
+        std::fs::write(proc.join("41/maps"), line("/usr/lib/libssl.so.3")).unwrap();
+        std::fs::write(proc.join("self/maps"), line("/usr/lib/libz.so.1 (deleted)")).unwrap();
+        assert!(!stale_system_files_in_use(&proc), "only numbered folders are processes");
+        let both = format!("{}\n{}\n", line("/usr/lib/libz.so"), line("/usr/lib/libssl.so.3 (deleted)"));
+        std::fs::write(proc.join("41/maps"), both).unwrap();
+        assert!(stale_system_files_in_use(&proc));
+        std::fs::remove_dir_all(&proc).unwrap();
     }
 
     #[test]

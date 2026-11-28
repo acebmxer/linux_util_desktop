@@ -70,7 +70,8 @@ function isTask(u: Utility): boolean {
 }
 
 // linux_util's menu offers a reboot after any successful System Task, Docker or
-// Drivers item except these (its NO_REBOOT list in linux_util.sh). Keep in step.
+// Drivers item except these (the NO_REBOOT list in its _task_wants_reboot). The
+// contract test fails when the two lists differ.
 const NO_REBOOT = new Set([
   "Create Snapshot",
   "Restore Snapshot",
@@ -82,13 +83,23 @@ const NO_REBOOT = new Set([
   "Manage Share",
   "Configure Syncthing Folders",
   "Parallel Downloads",
+  "Unattended Upgrades",
+  "Configure Unattended Upgrades",
 ]);
 let rebootItems = new Set<string>();
+// Whether the current run is a dry run, which changes nothing and so never
+// offers a reboot (as in linux_util's menu).
+let runIsDry = false;
+// Under WSL 2, linux_util offers to restart WSL after any utility that changed
+// something, so the Windows Start menu shows the change.
+let wsl2 = false;
 
 function rebootsAfter(name: string): boolean {
-  if (NO_REBOOT.has(name)) return false;
   const u = utilities.find((x) => x.name === name);
-  return name === "Docker" || (u !== undefined && (isTask(u) || u.category === "Drivers"));
+  if (u === undefined) return false;
+  if (wsl2) return true;
+  if (NO_REBOOT.has(name)) return false;
+  return name === "Docker" || isTask(u) || u.category === "Drivers";
 }
 
 // System tasks change a setting rather than add software, so they are applied
@@ -388,12 +399,13 @@ function confirmRemove(names: string[]) {
 
 async function launch(op: Op, names: string[], title: string) {
   const dryRun = $<HTMLInputElement>("dryrun").checked;
-  await openRun(`${title}${dryRun ? " (dry run)" : ""}`, names, () => invoke("run_action", { op, names, dryRun }));
+  await openRun(`${title}${dryRun ? " (dry run)" : ""}`, names, () => invoke("run_action", { op, names, dryRun }), dryRun);
 }
 
 // Shows the run panel with one queue entry per name, then starts the run.
-async function openRun(title: string, names: string[], begin: () => Promise<unknown>) {
+async function openRun(title: string, names: string[], begin: () => Promise<unknown>, dryRun = false) {
   rebootItems = new Set();
+  runIsDry = dryRun;
   term.reset();
   $("runtitle").textContent = title;
   $("runsummary").textContent = "";
@@ -508,7 +520,7 @@ listen<{ index: number; name: string; state: string; code: number | null }>("run
   }
   if (state === "running") term.line(`--- ${name} ---`);
   else if (state === "ok") {
-    if (code !== 3 && rebootsAfter(name)) rebootItems.add(name);
+    if (!runIsDry && code !== 3 && rebootsAfter(name)) rebootItems.add(name);
     term.line(`--- ${name}: finished ---`);
   }
   else if (state === "failed") term.line(`--- ${name}: failed${code !== null ? ` (exit ${code})` : ""} ---`, "err");
@@ -535,11 +547,12 @@ listen<{ ok: number; failed: number; cancelled: boolean }>("run-done", (ev) => {
   $("selnote").textContent = "";
   setRunning(false);
   load();
-  if (ok > 0 && !cancelled) offerReboot();
+  if (ok > 0 && !cancelled && !runIsDry) offerReboot();
 });
 
 // Same offer linux_util's menu makes at the end of a run: after a System Task,
-// Docker or Drivers item, or when the system says a reboot is pending.
+// Docker or Drivers item, after any change under WSL 2, or when the system says
+// a reboot is pending. Under WSL 2 it is a restart of WSL, worded as such.
 async function offerReboot() {
   if (rebootItems.size === 0) {
     try {
@@ -549,6 +562,11 @@ async function offerReboot() {
     }
   }
   $("rebooterr").textContent = "";
+  $("reboottitle").textContent = wsl2 ? "Restart WSL" : "Reboot needed";
+  $("reboottext").textContent = wsl2
+    ? "Restart WSL now so the Windows Start menu shows the changes? This closes every open Linux app, including this one. Save your work first."
+    : "A reboot is recommended to finish these changes. Save your work first.";
+  $("rebootnow").textContent = wsl2 ? "Restart WSL now" : "Reboot now";
   const dialog = $<HTMLDialogElement>("reboot");
   if (!dialog.open) dialog.showModal();
   $("rebootlater").focus();
@@ -932,6 +950,7 @@ invoke<Settings>("get_settings").then((s) => {
   showAutoConfirm(s);
   if (s.check_updates) checkUpdate(false);
 });
+invoke<boolean>("is_wsl2").then((w) => (wsl2 = w));
 invoke<string | null>("detected_distro").then((d) => {
   if (!d) return;
   $("distro").textContent = d;

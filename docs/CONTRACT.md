@@ -64,6 +64,22 @@ changes nothing. The app's `sudo` shim no longer looks at these commands. The
 contract test runs `update_xrdp` and `uninstall_xrdp` with a process named
 `xrdp-sesexec` running and the system commands stubbed.
 
+## Reboot offer
+
+The app ends a run with the same reboot offer as linux_util's menu, worked out
+the same way, since a single `--install` run does not make it. A successful
+item (exit 0, not 3) asks for a reboot when it is a System Task, Docker or a
+Drivers item and not in the `NO_REBOOT` list of `_task_wants_reboot`
+(`linux_util.sh`); under WSL 2 (`_is_wsl2`: `WSL2` in `/proc/version`) any
+utility that changed something asks for a restart of WSL instead. With none of
+those, the app still offers it when `_reboot_required`
+(`lib/installers/_shared.sh`) would: the `/var/run/reboot-required` marker,
+`needs-restarting -r` failing, or on the Arch family the running kernel's
+module folder gone or a replaced file under `/usr/lib`, `/usr/lib32`,
+`/usr/bin` or `/usr/sbin` still mapped by a process. A dry run never offers
+one. The contract test checks the `NO_REBOOT` list against the app's
+(`src/main.ts`) and that each of these checks is still there.
+
 ## Logs
 
 The log viewer reads `logs/` beside the per-user copy: `success_*.log`,

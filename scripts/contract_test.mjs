@@ -5,7 +5,8 @@
 // LINUX_UTIL_NO_SELF_UPDATE switch runs set is still honoured. Also the
 // front-end signals the app relies on instead of reading output text: exit 3
 // for "nothing to change", the question signals with LINUX_UTIL_GUI=1, and no
-// xrdp restart while an RDP session is open.
+// xrdp restart while an RDP session is open. And the reboot rules the app
+// copies still match linux_util's own.
 // Runs the script as the current (non-root) user from a temporary copy, since
 // linux_util.sh writes logs/ next to itself. No system changes are made.
 import { spawn, spawnSync } from "node:child_process";
@@ -53,6 +54,44 @@ for (const key of CONFIG_KEYS) {
 const selfUpdate = readFileSync(join(vendor, "lib", "installers", "self_update.sh"), "utf8");
 if (!/LINUX_UTIL_NO_SELF_UPDATE:-0\}" == "1"/.test(selfUpdate)) {
   fail("lib/installers/self_update.sh no longer skips the update check for LINUX_UTIL_NO_SELF_UPDATE=1");
+}
+
+// The app's reboot offer copies linux_util's rules (rebootsAfter in src/main.ts,
+// reboot_needed and is_wsl2 in src-tauri/src/actions/mod.rs): the no-reboot
+// list in _task_wants_reboot, a restart offer after any change under WSL 2, and
+// _reboot_required's checks (marker file, needs-restarting, Arch's own).
+{
+  const appSource = readFileSync(join(vendor, "..", "src", "main.ts"), "utf8");
+  const shared = readFileSync(join(vendor, "lib", "installers", "_shared.sh"), "utf8");
+  const body = (text, fn) => text.match(new RegExp(`^${fn}\\(\\) \\{\\n([\\s\\S]*?)^\\}$`, "m"))?.[1];
+  const names = (text) => [...text.matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  const wants = body(source, "_task_wants_reboot");
+  const theirs = wants?.match(/local -A NO_REBOOT=\(([^)]*)\)/);
+  const ours = appSource.match(/const NO_REBOOT = new Set\(\[([^\]]*)\]\)/);
+  if (!theirs) fail("linux_util.sh: _task_wants_reboot no longer has a NO_REBOOT list");
+  else if (!ours) fail("src/main.ts has no NO_REBOOT list");
+  else {
+    const [a, b] = [names(theirs[1]), names(ours[1])];
+    const only = (x, y) => x.filter((n) => !y.includes(n)).join(", ") || "none";
+    if (a.join("\n") !== b.join("\n")) {
+      fail(`NO_REBOOT differs from src/main.ts: only in linux_util: ${only(a, b)}; only in the app: ${only(b, a)}`);
+    }
+  }
+  if (!/\n\s*_is_wsl2\s*\n?$/.test(wants ?? "")) fail("_task_wants_reboot no longer ends with the WSL 2 rule (_is_wsl2)");
+  if (!/grep -q 'WSL2' "\$\{1:-\/proc\/version\}"/.test(body(shared, "_is_wsl2") ?? "")) {
+    fail("_is_wsl2 no longer looks for WSL2 in /proc/version");
+  }
+  const required = body(shared, "_reboot_required") ?? "";
+  for (const check of ["/var/run/reboot-required", "needs-restarting -r", "_reboot_required_arch"]) {
+    if (!required.includes(check)) fail(`_reboot_required no longer uses ${check}`);
+  }
+  const arch = body(shared, "_reboot_required_arch") ?? "";
+  for (const check of ['"${DISTRO_FAMILY:-}" == "arch"', "/usr/lib/modules/${_kver}", "_reboot_stale_files"]) {
+    if (!arch.includes(check)) fail(`_reboot_required_arch no longer uses ${check}`);
+  }
+  if (!(body(shared, "_reboot_stale_files") ?? "").includes("/usr/(lib|lib32|bin|sbin)/.*\\(deleted\\)$")) {
+    fail("_reboot_stale_files no longer looks for replaced files under /usr/lib, /usr/lib32, /usr/bin and /usr/sbin");
+  }
 }
 
 const work = mkdtempSync(join(tmpdir(), "lud-contract-"));

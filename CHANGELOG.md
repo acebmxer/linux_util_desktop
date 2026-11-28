@@ -13,6 +13,13 @@ release is cut.
 
 ### Fixed
 
+- **The reboot offer matches linux_util's menu again** (#32). Applying
+  Unattended Upgrades or Configure Unattended Upgrades no longer offers a
+  reboot. Under WSL 2, any run that changed something now offers to restart
+  WSL, so the Windows Start menu shows the change. On Arch and distros built on
+  it, the app now also sees a pending reboot after an upgrade replaced the
+  running kernel or system libraries still in use.
+- **A dry run no longer offers a reboot** (#31).
 - **Each item in a run ends as soon as its script does** (#30). Every item
   waited an extra 2 seconds after its script had finished, so a queue of 10
   took 20 seconds longer, and pressing Cancel in those 2 seconds marked an item

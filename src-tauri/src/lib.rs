@@ -208,10 +208,15 @@ async fn run_list(app: tauri::AppHandle) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// The distro's display name from `/etc/os-release` (falls back to `/usr/lib`).
+/// The text of `/etc/os-release`, or of `/usr/lib/os-release` without it.
+pub(crate) fn os_release() -> Option<String> {
+    std::fs::read_to_string("/etc/os-release").or_else(|_| std::fs::read_to_string("/usr/lib/os-release")).ok()
+}
+
+/// The distro's display name from `os-release`.
 #[tauri::command]
 fn detected_distro() -> Option<String> {
-    let text = std::fs::read_to_string("/etc/os-release").or_else(|_| std::fs::read_to_string("/usr/lib/os-release")).ok()?;
+    let text = os_release()?;
     text.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
 }
 
@@ -277,6 +282,7 @@ pub fn run() {
             actions::cancel_run,
             actions::send_input,
             actions::reboot_needed,
+            actions::is_wsl2,
             actions::reboot_now,
             actions::start_session,
             profiles::list_profiles,
