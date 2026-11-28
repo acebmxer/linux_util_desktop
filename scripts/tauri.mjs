@@ -22,6 +22,10 @@ child.on("error", (e) => {
 child.on("exit", (code, signal) => {
   // ESC[?1l: normal cursor keys. ESC>: normal keypad.
   if (process.stdout.isTTY) process.stdout.write("\x1b[?1l\x1b>");
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 1);
+  if (signal) {
+    // End with the same signal (exit code 130 for Ctrl+C), so a stopped build
+    // counts as failed. The handlers above would catch it and exit 0 instead.
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.removeAllListeners(sig);
+    process.kill(process.pid, signal);
+  } else process.exit(code ?? 1);
 });

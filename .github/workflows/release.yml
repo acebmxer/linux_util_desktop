@@ -39,7 +39,7 @@ jobs:
     outputs:
       changed: ${{ steps.check.outputs.changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 2
 
@@ -66,7 +66,7 @@ jobs:
     outputs:
       beta: ${{ steps.beta.outputs.n }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Stable and beta alike: a beta of a version that is already released would
       # be labelled with the old number (v0.2.1-beta.12 after v0.2.1).
@@ -89,14 +89,16 @@ jobs:
             | sed -n 's|.*-beta\.\([0-9]*\)$|\1|p' | sort -n | tail -1)
           echo "n=$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-27
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -128,7 +130,7 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: release/
@@ -142,9 +144,9 @@ jobs:
       matrix:
         distro: [ubuntu, fedora, opensuse, arch]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release
@@ -163,9 +165,9 @@ jobs:
     steps:
       # Checkout first: on an empty workspace it clears the folder, which would
       # delete files downloaded before it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release

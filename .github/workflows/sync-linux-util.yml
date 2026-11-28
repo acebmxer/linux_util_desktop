@@ -4,6 +4,12 @@ name: Sync linux_util
 # in vendor/linux_util.VERSION. The contract test runs here, because PRs opened
 # with GITHUB_TOKEN do not trigger the Build workflow. A failing contract opens
 # the PR as a draft with the failures in its description, and this run fails.
+#
+# The contract test runs the newly fetched linux_util, so nothing it can reach
+# may hold the write token: checkout leaves no credentials in .git/config, and
+# the token is given only to the step that pushes and opens the PR, which runs
+# git with hooks and the file-system monitor turned off on its command line
+# (fetched code could have written .git/hooks or .git/config).
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -25,9 +31,10 @@ jobs:
   sync:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.BASE }}
+          persist-credentials: false
 
       - name: Find newer linux_util tag
         id: tag
@@ -52,7 +59,7 @@ jobs:
             echo "branch=$branch"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.tag.outputs.tag
         with:
           node-version: 22
@@ -82,10 +89,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898229+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
-          git add vendor
-          git commit -m "chore: vendor linux_util $TAG"
-          git push origin "$BRANCH"
+          safe=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
+          git "${safe[@]}" switch -c "$BRANCH"
+          git "${safe[@]}" add vendor
+          git "${safe[@]}" commit -m "chore: vendor linux_util $TAG"
+          # The token goes in for this push only, as checkout would send it.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git "${safe[@]}" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$BRANCH"
 
           {
             echo "Updates the bundled linux_util from $CURRENT to $TAG."
