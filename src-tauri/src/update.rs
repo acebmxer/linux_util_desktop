@@ -15,12 +15,15 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use minisign_verify::{PublicKey, Signature};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{time, Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport};
 
 use crate::actions::{self, RunState};
 
@@ -47,6 +50,13 @@ const MAX_NOTES: usize = 20_000;
 const BETA_BUILD: Option<&str> = option_env!("LU_BETA_BUILD");
 /// Sorts a stable release above every beta of the same version.
 const STABLE: u64 = u64::MAX;
+/// A download that receives nothing at all for this long fails. A slow line
+/// that keeps sending is never cut off.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
+/// How often a download waiting for data looks whether Cancel was pressed.
+const CANCEL_CHECK: Duration = Duration::from_millis(250);
+/// The error a download stopped by Cancel ends with.
+const CANCELLED: &str = "Cancelled";
 
 /// A release's place in time: version numbers, then beta number (`STABLE` for
 /// a stable release).
@@ -139,15 +149,106 @@ fn running_label(version: &str, beta: Option<&str>) -> String {
     }
 }
 
-fn agent(download: bool) -> ureq::Agent {
-    let builder = ureq::Agent::config_builder().user_agent(format!("linux-util-desktop/{}", env!("CARGO_PKG_VERSION")));
-    let builder = if download {
-        // A big file on a slow line is fine; a stalled connection is not.
-        builder.timeout_connect(Some(Duration::from_secs(15))).timeout_recv_response(Some(Duration::from_secs(30)))
-    } else {
-        builder.timeout_global(Some(Duration::from_secs(20)))
-    };
-    builder.build().into()
+fn config_builder() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder().user_agent(format!("linux-util-desktop/{}", env!("CARGO_PKG_VERSION")))
+}
+
+/// For the release check and the small checksum files: all of it within 20 s.
+fn agent() -> ureq::Agent {
+    config_builder().timeout_global(Some(Duration::from_secs(20))).build().into()
+}
+
+/// For the update file itself. A big file on a slow line has no overall time
+/// limit, so every wait for data goes through `WaitGuard`: it fails after
+/// `stall` with nothing received, and as soon as `cancelled` says so.
+fn download_agent(cancelled: Cancelled, stall: Duration) -> ureq::Agent {
+    let config =
+        config_builder().timeout_connect(Some(Duration::from_secs(15))).timeout_recv_response(Some(Duration::from_secs(30))).build();
+    ureq::Agent::with_parts(config, DefaultConnector::new().chain(WaitGuard { cancelled, stall }), DefaultResolver::default())
+}
+
+/// Says whether the download should stop now.
+type Cancelled = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Wraps each connection a download makes (TLS included) in `Guarded`.
+struct WaitGuard {
+    cancelled: Cancelled,
+    stall: Duration,
+}
+
+impl std::fmt::Debug for WaitGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitGuard").field("stall", &self.stall).finish_non_exhaustive()
+    }
+}
+
+impl Connector<Box<dyn Transport>> for WaitGuard {
+    type Out = Guarded;
+
+    fn connect(&self, _: &ConnectionDetails, chained: Option<Box<dyn Transport>>) -> Result<Option<Guarded>, ureq::Error> {
+        Ok(chained.map(|inner| Guarded { inner, cancelled: self.cancelled.clone(), stall: self.stall }))
+    }
+}
+
+/// A connection whose reads wait in short steps, so a blocked read can be
+/// given up when Cancel is pressed or nothing arrives for `stall`. ureq on its
+/// own waits for the body's data with no limit (issue #29).
+struct Guarded {
+    inner: Box<dyn Transport>,
+    cancelled: Cancelled,
+    stall: Duration,
+}
+
+impl std::fmt::Debug for Guarded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Guarded").field("inner", &self.inner).field("stall", &self.stall).finish_non_exhaustive()
+    }
+}
+
+impl Transport for Guarded {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let started = Instant::now();
+        // ureq's own limit for this step (the response headers), if it has one.
+        let limit = timeout.not_zero().map(|d| *d);
+        loop {
+            if (self.cancelled)() {
+                // Not `Interrupted`: readers take that as "try again".
+                return Err(std::io::Error::other(CANCELLED).into());
+            }
+            let waited = started.elapsed();
+            let left = match limit {
+                Some(limit) if waited >= limit => return Err(ureq::Error::Timeout(timeout.reason)),
+                Some(limit) => limit - waited,
+                None => Duration::MAX,
+            };
+            if waited >= self.stall {
+                let message = format!("nothing was received for {} s", self.stall.as_secs());
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, message).into());
+            }
+            let step = left.min(CANCEL_CHECK).min(self.stall - waited);
+            match self.inner.await_input(NextTimeout { after: time::Duration::Exact(step), reason: timeout.reason }) {
+                // The step ran out with nothing read; nothing was lost, so wait again.
+                Err(ureq::Error::Timeout(_)) => continue,
+                other => return other,
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
 }
 
 /// The release check's address, and whether it is the test override.
@@ -196,7 +297,7 @@ fn release_from(doc: &serde_json::Value, overridden: bool) -> Result<Release, St
 /// newest of all (betas included) when `beta` is set.
 fn fetch_release(beta: bool) -> Result<Release, String> {
     let (url, overridden) = releases_url(beta);
-    let mut response = agent(false)
+    let mut response = agent()
         .get(&url)
         .header("Accept", "application/vnd.github+json")
         .call()
@@ -306,7 +407,11 @@ fn sha256_of(path: &Path) -> std::io::Result<String> {
 /// `dest` must not exist yet: it is created exclusively, so a file or link put
 /// there beforehand is never written through. Stops when the run is cancelled.
 fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
-    let mut response = agent(true).get(url).call().map_err(|e| format!("Download failed: {e}"))?;
+    let cancelled: Cancelled = {
+        let app = app.clone();
+        Arc::new(move || actions::is_cancelled(&app))
+    };
+    let mut response = download_agent(cancelled, DOWNLOAD_STALL).get(url).call().map_err(|e| format!("Download failed: {e}"))?;
     let total = response.body().content_length();
     let mut reader = response.body_mut().with_config().limit(MAX_DOWNLOAD).reader();
     let mut file = std::fs::OpenOptions::new()
@@ -319,7 +424,7 @@ fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
     let mut buf = [0u8; 64 * 1024];
     loop {
         if actions::is_cancelled(app) {
-            return Err("Cancelled".to_string());
+            return Err(CANCELLED.to_string());
         }
         let n = reader.read(&mut buf).map_err(|e| format!("Download failed: {e}"))?;
         if n == 0 {
@@ -344,7 +449,7 @@ fn fetch_verified(app: &AppHandle, plan: &Plan, dest_dir: &Path, file_name: &str
     let (name, url) = &plan.file;
     let fetch_text = |url: &str, what: &str| {
         actions::emit_output(app, &format!("Downloading {what}"), false);
-        agent(false).get(url).call().and_then(|mut r| r.body_mut().read_to_string()).map_err(|e| format!("Could not download {what}: {e}"))
+        agent().get(url).call().and_then(|mut r| r.body_mut().read_to_string()).map_err(|e| format!("Could not download {what}: {e}"))
     };
     let sums = fetch_text(&plan.sums, SUMS_NAME)?;
     let sig = fetch_text(&plan.sig, SIG_NAME)?;
@@ -412,7 +517,7 @@ fn replace_appimage(plan: &Plan, target: &Path, app: &AppHandle) -> Result<(), S
     let scratch = Scratch::new_in(dir)?;
     let staged = fetch_verified(app, plan, &scratch.0, &plan.file.0)?;
     if actions::is_cancelled(app) {
-        return Err("Cancelled".to_string());
+        return Err(CANCELLED.to_string());
     }
     std::fs::metadata(target)
         .map(|m| m.permissions().mode() & 0o777 | 0o755)
@@ -476,7 +581,7 @@ fn run_update(app: &AppHandle, version: &str) {
         Err(e) => return fail(e),
     };
     if actions::is_cancelled(app) {
-        return fail("Cancelled".to_string());
+        return fail(CANCELLED.to_string());
     }
     match &plan.method {
         Method::AppImage(target) => match replace_appimage(&plan, target, app) {
@@ -497,7 +602,7 @@ fn run_update(app: &AppHandle, version: &str) {
                 Err(e) => return fail(e),
             };
             if actions::is_cancelled(app) {
-                return fail("Cancelled".to_string());
+                return fail(CANCELLED.to_string());
             }
             actions::run_queue(app, &names, &|_| package_command(method, &file, reinstall));
         }
@@ -669,6 +774,84 @@ fzp9YfNPf0p6vwOIvK0zXwTKcRAgXx7TSH2DBfRUOO9eQhpM4ah5pauiaFCRI0uJne2peK2dM9PPRPPr
         let (file, sums, sig) = release_files(&release_from(&signed, false).unwrap(), deb).unwrap();
         assert_eq!(file.0, deb);
         assert!(sums.ends_with(SUMS_NAME) && sig.ends_with(SIG_NAME));
+    }
+
+    /// A local server for one request: it sends headers for a `total`-byte
+    /// body, then `chunks` of bytes `gap` apart, then holds the connection open
+    /// without sending anything more until the test ends. Returns its address.
+    fn server(total: usize, chunks: Vec<usize>, gap: Duration) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && conn.read(&mut byte).unwrap() == 1 {
+                request.push(byte[0]);
+            }
+            write!(conn, "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n\r\n").unwrap();
+            for n in chunks {
+                std::thread::sleep(gap);
+                conn.write_all(&vec![b'x'; n]).unwrap();
+                conn.flush().unwrap();
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        format!("http://{addr}/file")
+    }
+
+    /// Reads all of `url` with the download agent on a thread. Gives up after
+    /// 10 s, so a download that blocks for good fails the test instead of
+    /// hanging it. Returns how long the read took and its result.
+    fn fetch(url: String, cancelled: Cancelled, stall: Duration) -> (Duration, std::io::Result<Vec<u8>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = download_agent(cancelled, stall).get(&url).call().map_err(ureq::Error::into_io).and_then(|mut r| {
+                let mut body = Vec::new();
+                r.body_mut().with_config().limit(MAX_DOWNLOAD).reader().read_to_end(&mut body).map(|_| body)
+            });
+            let _ = tx.send((started.elapsed(), result));
+        });
+        rx.recv_timeout(Duration::from_secs(10)).expect("the download was still blocked after 10 s")
+    }
+
+    fn never() -> Cancelled {
+        Arc::new(|| false)
+    }
+
+    #[test]
+    fn download_that_stops_sending_fails() {
+        let url = server(1_000_000, vec![1000], Duration::ZERO);
+        let (took, result) = fetch(url, never(), Duration::from_secs(1));
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(err.to_string().contains("nothing was received for 1 s"), "{err}");
+        assert!(took < Duration::from_secs(3), "took {took:?}");
+    }
+
+    #[test]
+    fn cancel_stops_a_download_waiting_for_data() {
+        let url = server(1_000_000, vec![1000], Duration::ZERO);
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (set, read) = (flag.clone(), flag.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            set.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (took, result) = fetch(url, Arc::new(move || read.load(std::sync::atomic::Ordering::SeqCst)), DOWNLOAD_STALL);
+        assert_eq!(result.unwrap_err().to_string(), CANCELLED);
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
+
+    /// The stall limit is for a gap with nothing received, not for the whole
+    /// download: this one takes four times the limit and still finishes.
+    #[test]
+    fn slow_download_that_keeps_sending_finishes() {
+        let url = server(1000, vec![100; 10], Duration::from_millis(400));
+        let (took, result) = fetch(url, never(), Duration::from_secs(1));
+        assert_eq!(result.unwrap().len(), 1000);
+        assert!(took >= Duration::from_secs(4), "took {took:?}");
     }
 
     #[test]

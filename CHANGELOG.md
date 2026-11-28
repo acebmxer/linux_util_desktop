@@ -11,6 +11,15 @@ release is cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An update download that stops receiving data no longer hangs** (#29). If
+  the connection stalled partway through (Wi-Fi dropped, the laptop slept),
+  the download waited forever, Cancel did nothing, and every later action said
+  "Another action is already running" until the app was restarted. Now the
+  download fails after 60 seconds with nothing received, and Cancel stops it
+  at once. A slow connection that keeps sending is never cut off.
+
 ## [0.3.3] - 2026-11-25
 
 ### Changed

@@ -18,7 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
 libc = "0.2"
-ureq = "3"
+# Pinned to 3.4.x: the download guard in update.rs uses ureq's `unversioned`
+# transport API, which ureq may change in a minor release (never a patch).
+ureq = "~3.4"
 sha2 = "0.10"
 minisign-verify = "0.3"
 
