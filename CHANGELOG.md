@@ -13,6 +13,11 @@ release is cut.
 
 ### Fixed
 
+- **The window no longer freezes while shortcuts are checked or changed**
+  (#39). On the first launch, when Settings opened, and when shortcut changes
+  were saved, the window stopped responding until KDE's or GNOME's own tools
+  answered, which could take up to 25 seconds if the panel was slow. The
+  end-of-run check for a pending reboot no longer holds the window either.
 - **An update is only installed from the files of the release it names**
   (#40). A beta and the stable release of one version have files with the same
   names, each validly signed, so a faked reply from GitHub could have handed a

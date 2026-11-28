@@ -507,8 +507,14 @@ pub fn askpass_reply(state: State<'_, RunState>, password: Option<String>) {
 /// makes before it offers one (`_reboot_required` in
 /// `lib/installers/_shared.sh`): the Debian marker file, `needs-restarting -r`
 /// on Fedora/RHEL, and on Arch, which has neither, the running system itself.
+/// Runs off the window's thread: `needs-restarting` and reading every
+/// process's memory map take a while (issue #39).
 #[tauri::command]
-pub fn reboot_needed() -> bool {
+pub async fn reboot_needed() -> bool {
+    tauri::async_runtime::spawn_blocking(reboot_pending).await.unwrap_or(false)
+}
+
+fn reboot_pending() -> bool {
     if Path::new("/var/run/reboot-required").exists() {
         return true;
     }

@@ -129,10 +129,21 @@ pub struct Status {
     asked: bool,
 }
 
+/// Runs `work` off the window's thread. Checking and changing shortcuts waits
+/// for desktop tools (`gdbus`, `gsettings`, `kbuildsycoca6`, `gio`), up to
+/// `gdbus`'s 25 s D-Bus timeout, and the window must keep responding (issue #39).
+async fn off_window_thread<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
-pub fn shortcut_status(app: AppHandle) -> Status {
+pub async fn shortcut_status(app: AppHandle) -> Result<Status, String> {
+    off_window_thread(move || Ok(current_status(&app))).await
+}
+
+fn current_status(app: &AppHandle) -> Status {
     let install = install();
-    let desktop = desktop_dir(&app);
+    let desktop = desktop_dir(app);
     let can_menu = matches!(install, Some(Install::AppImage(_))) && !in_system_menu();
     let taskbar = install.as_ref().and_then(|_| taskbar_pinned());
     Status {
@@ -141,9 +152,9 @@ pub fn shortcut_status(app: AppHandle) -> Status {
         can_taskbar: taskbar.is_some(),
         taskbar_needs_menu: can_menu,
         has_desktop: desktop.is_some_and(|d| !launchers(&d).is_empty()),
-        has_menu: menu_launcher(&app).is_some(),
+        has_menu: menu_launcher(app).is_some(),
         has_taskbar: taskbar == Some(true),
-        asked: asked(&app),
+        asked: asked(app),
     }
 }
 
@@ -418,22 +429,26 @@ fn set_taskbar(pin: bool) -> Result<(), String> {
 /// Adds the desktop icon, the menu entry and/or the taskbar icon. What is
 /// already there, or cannot be offered for this install, is skipped.
 #[tauri::command]
-pub fn add_shortcuts(app: AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
-    let status = shortcut_status(app.clone());
+pub async fn add_shortcuts(app: AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
+    off_window_thread(move || add(&app, desktop, menu, taskbar)).await
+}
+
+fn add(app: &AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
+    let status = current_status(app);
     let desktop = desktop && status.can_desktop && !status.has_desktop;
     let menu = menu && status.can_menu && !status.has_menu;
     if desktop || menu {
-        let text = launcher_text(&app)?;
+        let text = launcher_text(app)?;
         if desktop {
-            let dir = desktop_dir(&app).ok_or("No desktop folder")?;
+            let dir = desktop_dir(app).ok_or("No desktop folder")?;
             write_launcher(&dir, &text, true)?;
         }
         if menu {
-            let dir = menu_dir(&app).ok_or("No data directory")?;
+            let dir = menu_dir(app).ok_or("No data directory")?;
             write_launcher(&dir, &text, false)?;
         }
     }
-    let menu_ready = !status.taskbar_needs_menu || menu_launcher(&app).is_some();
+    let menu_ready = !status.taskbar_needs_menu || menu_launcher(app).is_some();
     if taskbar && status.can_taskbar && !status.has_taskbar && menu_ready {
         set_taskbar(true)?;
     }
@@ -453,26 +468,30 @@ fn remove(path: &Path) -> Result<(), String> {
 /// too, as the pin would point at nothing. The AppImage's icon copy goes once
 /// neither launcher is left.
 #[tauri::command]
-pub fn remove_shortcuts(app: AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
-    let status = shortcut_status(app.clone());
+pub async fn remove_shortcuts(app: AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
+    off_window_thread(move || remove_some(&app, desktop, menu, taskbar)).await
+}
+
+fn remove_some(app: &AppHandle, desktop: bool, menu: bool, taskbar: bool) -> Result<(), String> {
+    let status = current_status(app);
     if status.has_taskbar && (taskbar || (menu && status.taskbar_needs_menu)) {
         set_taskbar(false)?;
     }
     if desktop {
-        if let Some(dir) = desktop_dir(&app) {
+        if let Some(dir) = desktop_dir(app) {
             for path in launchers(&dir) {
                 remove(&path)?;
             }
         }
     }
     if menu {
-        if let Some(path) = menu_launcher(&app) {
+        if let Some(path) = menu_launcher(app) {
             remove(&path)?;
         }
     }
-    let status = shortcut_status(app.clone());
+    let status = current_status(app);
     if !status.has_desktop && !status.has_menu {
-        remove(&icon_path(&app)?)?;
+        remove(&icon_path(app)?)?;
     }
     Ok(())
 }
